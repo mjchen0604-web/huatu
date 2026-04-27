@@ -654,6 +654,9 @@ def _effective_config(include_secrets: bool = False) -> dict[str, Any]:
     for key, value in saved.items():
         if value is not None:
             defaults[key] = value
+    admin_password = os.environ.get("AUTOFIGURE_ADMIN_PASSWORD", "")
+    if admin_password and defaults.get("apiKey") == admin_password:
+        defaults["apiKey"] = ""
     if not include_secrets:
         for key in SECRET_CONFIG_FIELDS:
             defaults[key] = ""
@@ -715,8 +718,11 @@ def save_config(req: SaveConfigRequest) -> JSONResponse:
         for key, value in req.defaults.items()
         if key in CONFIG_FIELDS and isinstance(value, (str, int, float, bool))
     }
+    admin_password = os.environ.get("AUTOFIGURE_ADMIN_PASSWORD", "")
     for key, value in incoming.items():
         current[key] = str(value).strip() if isinstance(value, str) else value
+    if admin_password and current.get("apiKey") == admin_password:
+        raise HTTPException(status_code=400, detail="API Key cannot be the admin password")
     _write_saved_config(current)
     _apply_saved_config_to_env(current)
     return JSONResponse(_config_payload(include_secrets=True))

@@ -368,6 +368,13 @@
         }
         return;
       }
+      const configState = collectConfigState();
+      if (configState.apiKey && configState.apiKey === adminAuthPassword) {
+        if (configStatus) {
+          configStatus.textContent = "API Key 不能填管理员密码，请改成 Sub2API 里生成的密钥。";
+        }
+        return;
+      }
       if (configStatus) {
         configStatus.textContent = "正在保存到服务器...";
       }
@@ -377,7 +384,7 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             password: adminAuthPassword,
-            defaults: collectConfigState(),
+            defaults: configState,
           }),
         });
         if (!response.ok) {

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>智能画布</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=zh-20260427-snapshot-fix" />
+    <link rel="stylesheet" href="/styles.css?v=zh-20260428-config-persist" />
   </head>
   <body data-page="input">
     <div class="page">
@@ -65,7 +65,9 @@
                 id="adminPassword"
                 type="password"
                 class="input"
-                autocomplete="current-password"
+                autocomplete="new-password"
+                autocapitalize="off"
+                spellcheck="false"
                 placeholder="输入管理员密码"
               />
               <button id="adminUnlockBtn" class="ghost" type="button">解锁</button>
@@ -88,7 +90,17 @@
           <div class="field-group">
             <label class="field-label" for="apiKey">API Key</label>
             <div class="secret-input">
-              <input id="apiKey" type="password" class="input" placeholder="sk-..." />
+              <input
+                id="apiKey"
+                type="password"
+                class="input"
+                placeholder="sk-..."
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                data-lpignore="true"
+                data-1p-ignore="true"
+              />
               <button class="secret-toggle" type="button" data-secret-target="apiKey" aria-label="显示 API Key" title="显示 API Key">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z" />
@@ -156,6 +168,11 @@
                 type="password"
                 class="input"
                 placeholder="FAL / Roboflow API Key"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                data-lpignore="true"
+                data-1p-ignore="true"
               />
               <button class="secret-toggle" type="button" data-secret-target="samApiKey" aria-label="显示 SAM3 API Key" title="显示 SAM3 API Key">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -182,6 +199,11 @@
                 type="password"
                 class="input"
                 placeholder="Bria API Key"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                data-lpignore="true"
+                data-1p-ignore="true"
               />
               <button class="secret-toggle" type="button" data-secret-target="briaApiKey" aria-label="显示 Bria API Key" title="显示 Bria API Key">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -230,6 +252,6 @@
       </main>
     </div>
 
-    <script src="/app.js?v=zh-20260427-snapshot-fix"></script>
+    <script src="/app.js?v=zh-20260428-config-persist"></script>
   </body>
 </html>
