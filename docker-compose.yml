@@ -25,6 +25,18 @@ services:
       ROBOFLOW_API_URL: ${ROBOFLOW_API_URL:-https://serverless.roboflow.com/sam3/concept_segment}
       ROBOFLOW_API_FALLBACK_URLS: ${ROBOFLOW_API_FALLBACK_URLS:-}
       FAL_KEY: ${FAL_KEY:-}
+      BRIA_API_KEY: ${BRIA_API_KEY:-}
+      AUTOFIGURE_ADMIN_PASSWORD: ${AUTOFIGURE_ADMIN_PASSWORD:-}
+      AUTOFIGURE_DEFAULT_PROVIDER: ${AUTOFIGURE_DEFAULT_PROVIDER:-sub2api}
+      AUTOFIGURE_DEFAULT_API_KEY: ${AUTOFIGURE_DEFAULT_API_KEY:-}
+      AUTOFIGURE_DEFAULT_BASE_URL: ${AUTOFIGURE_DEFAULT_BASE_URL:-http://sub2api:8080/v1}
+      AUTOFIGURE_DEFAULT_IMAGE_MODEL: ${AUTOFIGURE_DEFAULT_IMAGE_MODEL:-gpt-image-2}
+      AUTOFIGURE_DEFAULT_SVG_MODEL: ${AUTOFIGURE_DEFAULT_SVG_MODEL:-gpt-5.5}
+      AUTOFIGURE_DEFAULT_REASONING_EFFORT: ${AUTOFIGURE_DEFAULT_REASONING_EFFORT:-high}
+      AUTOFIGURE_DEFAULT_SAM_BACKEND: ${AUTOFIGURE_DEFAULT_SAM_BACKEND:-roboflow}
+      AUTOFIGURE_DEFAULT_SAM_PROMPT: ${AUTOFIGURE_DEFAULT_SAM_PROMPT:-icon,person,robot,animal}
+      AUTOFIGURE_DEFAULT_SAM_API_KEY: ${AUTOFIGURE_DEFAULT_SAM_API_KEY:-}
+      AUTOFIGURE_DEFAULT_RMBG_BACKEND: ${AUTOFIGURE_DEFAULT_RMBG_BACKEND:-local}
     dns:
       - ${DOCKER_DNS_1:-223.5.5.5}
       - ${DOCKER_DNS_2:-119.29.29.29}
@@ -32,6 +44,9 @@ services:
       - ./outputs:/app/outputs
       - ./uploads:/app/uploads
       - hf_cache:/app/.cache/huggingface
+    networks:
+      - default
+      - sub2api-network
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
       interval: 30s
@@ -41,3 +56,8 @@ services:
 
 volumes:
   hf_cache:
+
+networks:
+  sub2api-network:
+    external: true
+    name: deploy_sub2api-network

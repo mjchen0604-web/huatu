@@ -5,6 +5,8 @@ Paper Method 到 SVG 图标替换完整流程 (Label 模式增强版 + Box合并
 - openrouter: OpenRouter API (https://openrouter.ai/api/v1)
 - bianxie: Bianxie API (https://api.bianxie.ai/v1) - 使用 OpenAI SDK
 - gemini: Google Gemini 官方 API (https://ai.google.dev/)
+- xai: xAI / Grok API (https://api.x.ai/v1)
+- sub2api: 本地 Sub2API / OpenAI 兼容网关
 
 占位符模式 (--placeholder_mode):
 - none: 无特殊样式（默认黑色边框）
@@ -73,6 +75,7 @@ import re
 import shutil
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Literal
 
@@ -104,13 +107,34 @@ PROVIDER_CONFIGS = {
         "default_image_model": "gemini-3.1-flash-image-preview",
         "default_svg_model": "gemini-3.1-pro-preview",
     },
+    "xai": {
+        "base_url": "https://api.x.ai/v1",
+        "default_image_model": "grok-imagine-image",
+        "default_svg_model": "grok-4.20-reasoning",
+    },
+    "sub2api": {
+        "base_url": "http://localhost:8080/v1",
+        "default_image_model": "gpt-image-2",
+        "default_svg_model": "gpt-5.5",
+    },
 }
 
-ProviderType = Literal["openrouter", "bianxie", "gemini"]
+ProviderType = Literal["openrouter", "bianxie", "gemini", "xai", "sub2api"]
 PlaceholderMode = Literal["none", "box", "label"]
+RMBGBackend = Literal["local", "bria-api"]
 GEMINI_DEFAULT_IMAGE_SIZE = "4K"
 IMAGE_SIZE_CHOICES = ("1K", "2K", "4K")
+XAI_IMAGE_SIZE_CHOICES = ("1K", "2K")
 BOXLIB_NO_ICON_MODE_KEY = "no_icon_mode"
+RMBG_REQUIRED_CODE_FILES = (
+    "config.json",
+    "BiRefNet_config.py",
+    "birefnet.py",
+)
+RMBG_REQUIRED_WEIGHT_FILES = (
+    "model.safetensors",
+    "pytorch_model.bin",
+)
 
 # SAM3 API config
 SAM3_FAL_API_URL = "https://fal.run/fal-ai/sam-3/image"
@@ -129,6 +153,13 @@ REFERENCE_IMAGE_PATH: Optional[str] = None
 # 统一的 LLM 调用接口
 # ============================================================================
 
+def _normalize_reasoning_effort(reasoning_effort: Optional[str]) -> Optional[str]:
+    if not reasoning_effort:
+        return None
+    normalized = reasoning_effort.strip().lower()
+    return normalized if normalized and normalized != "none" else None
+
+
 def call_llm_text(
     prompt: str,
     api_key: str,
@@ -137,6 +168,7 @@ def call_llm_text(
     provider: ProviderType,
     max_tokens: int = 16000,
     temperature: float = 0.7,
+    reasoning_effort: Optional[str] = None,
 ) -> Optional[str]:
     """
     统一的文本 LLM 调用接口
@@ -150,6 +182,7 @@ def call_llm_text(
         reference_image: 参考图片（可选）
         max_tokens: 最大输出 token 数
         temperature: 温度参数
+        reasoning_effort: Sub2API/OpenAI 兼容推理强度（none/low/medium/high/xhigh）
 
     Returns:
         LLM 响应文本
@@ -158,6 +191,18 @@ def call_llm_text(
         return _call_bianxie_text(prompt, api_key, model, base_url, max_tokens, temperature)
     if provider == "gemini":
         return _call_gemini_text(prompt, api_key, model, max_tokens, temperature)
+    if provider == "xai":
+        return _call_xai_text(prompt, api_key, model, base_url, max_tokens, temperature)
+    if provider == "sub2api":
+        return _call_sub2api_text(
+            prompt,
+            api_key,
+            model,
+            base_url,
+            max_tokens,
+            temperature,
+            reasoning_effort,
+        )
     return _call_openrouter_text(prompt, api_key, model, base_url, max_tokens, temperature)
 
 
@@ -169,6 +214,7 @@ def call_llm_multimodal(
     provider: ProviderType,
     max_tokens: int = 16000,
     temperature: float = 0.7,
+    reasoning_effort: Optional[str] = None,
 ) -> Optional[str]:
     """
     统一的多模态 LLM 调用接口
@@ -181,6 +227,7 @@ def call_llm_multimodal(
         provider: API 提供商
         max_tokens: 最大输出 token 数
         temperature: 温度参数
+        reasoning_effort: Sub2API/OpenAI 兼容推理强度（none/low/medium/high/xhigh）
 
     Returns:
         LLM 响应文本
@@ -189,6 +236,18 @@ def call_llm_multimodal(
         return _call_bianxie_multimodal(contents, api_key, model, base_url, max_tokens, temperature)
     if provider == "gemini":
         return _call_gemini_multimodal(contents, api_key, model, max_tokens, temperature)
+    if provider == "xai":
+        return _call_xai_multimodal(contents, api_key, model, base_url, max_tokens, temperature)
+    if provider == "sub2api":
+        return _call_sub2api_multimodal(
+            contents,
+            api_key,
+            model,
+            base_url,
+            max_tokens,
+            temperature,
+            reasoning_effort,
+        )
     return _call_openrouter_multimodal(contents, api_key, model, base_url, max_tokens, temperature)
 
 
@@ -223,6 +282,23 @@ def call_llm_image_generation(
             model=model,
             reference_image=reference_image,
             image_size=image_size,
+        )
+    if provider == "xai":
+        return _call_xai_image_generation(
+            prompt=prompt,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            reference_image=reference_image,
+            image_size=image_size,
+        )
+    if provider == "sub2api":
+        return _call_sub2api_image_generation(
+            prompt=prompt,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            reference_image=reference_image,
         )
     return _call_openrouter_image_generation(prompt, api_key, model, base_url, reference_image)
 
@@ -942,6 +1018,304 @@ def _call_gemini_image_generation(
 
 
 # ============================================================================
+# xAI Provider 实现 (OpenAI 兼容接口)
+# ============================================================================
+
+def _normalize_xai_resolution(image_size: str) -> str:
+    normalized = (image_size or "").strip().lower()
+    if normalized == "2k":
+        return "2k"
+    return "1k"
+
+
+def _load_image_from_base64_or_url(image_payload: Optional[str], image_url: Optional[str]) -> Optional[Image.Image]:
+    if isinstance(image_payload, str) and image_payload:
+        try:
+            image_data = base64.b64decode(re.sub(r"\s+", "", image_payload))
+            image = Image.open(io.BytesIO(image_data))
+            image.load()
+            return image
+        except Exception:
+            pass
+
+    if isinstance(image_url, str) and image_url:
+        try:
+            response = requests.get(image_url, timeout=120)
+            response.raise_for_status()
+            image = Image.open(io.BytesIO(response.content))
+            image.load()
+            return image
+        except Exception:
+            pass
+
+    return None
+
+
+def _call_xai_text(
+    prompt: str,
+    api_key: str,
+    model: str,
+    base_url: str,
+    max_tokens: int = 16000,
+    temperature: float = 0.7,
+) -> Optional[str]:
+    """使用 OpenAI SDK 调用 xAI 文本接口"""
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(base_url=base_url, api_key=api_key)
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return completion.choices[0].message.content if completion and completion.choices else None
+    except Exception as e:
+        print(f"[xAI] 文本 API 调用失败: {e}")
+        raise
+
+
+def _call_xai_multimodal(
+    contents: List[Any],
+    api_key: str,
+    model: str,
+    base_url: str,
+    max_tokens: int = 16000,
+    temperature: float = 0.7,
+) -> Optional[str]:
+    """使用 OpenAI SDK 调用 xAI 多模态接口"""
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(base_url=base_url, api_key=api_key)
+        message_content: List[Dict[str, Any]] = []
+
+        for part in contents:
+            if isinstance(part, str):
+                message_content.append({"type": "text", "text": part})
+            elif isinstance(part, Image.Image):
+                buf = io.BytesIO()
+                part.save(buf, format='PNG')
+                image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+                message_content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                    }
+                )
+
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": message_content}],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return completion.choices[0].message.content if completion and completion.choices else None
+    except Exception as e:
+        print(f"[xAI] 多模态 API 调用失败: {e}")
+        raise
+
+
+def _call_xai_image_generation(
+    prompt: str,
+    api_key: str,
+    model: str,
+    base_url: str,
+    reference_image: Optional[Image.Image] = None,
+    image_size: str = GEMINI_DEFAULT_IMAGE_SIZE,
+) -> Optional[Image.Image]:
+    """调用 xAI 图像生成/编辑接口"""
+    resolution = _normalize_xai_resolution(image_size)
+    try:
+        if reference_image is None:
+            from openai import OpenAI
+
+            client = OpenAI(base_url=base_url, api_key=api_key)
+            response = client.images.generate(
+                model=model,
+                prompt=prompt,
+                response_format="b64_json",
+                extra_body={"resolution": resolution},
+            )
+            if response and getattr(response, "data", None):
+                item = response.data[0]
+                return _load_image_from_base64_or_url(
+                    getattr(item, "b64_json", None),
+                    getattr(item, "url", None),
+                )
+            return None
+
+        buf = io.BytesIO()
+        reference_image.save(buf, format='PNG')
+        image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "response_format": "b64_json",
+            "resolution": resolution,
+            "image": {
+                "url": f"data:image/png;base64,{image_b64}",
+                "type": "image_url",
+            },
+        }
+        api_url = base_url.rstrip("/") + "/images/edits"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        response = requests.post(api_url, headers=headers, json=payload, timeout=300)
+        if response.status_code != 200:
+            raise RuntimeError(f"xAI 图片编辑 API 错误: {response.status_code} - {response.text[:500]}")
+
+        result = response.json()
+        items = result.get("data") or []
+        if not items:
+            return None
+        first = items[0] if isinstance(items[0], dict) else {}
+        return _load_image_from_base64_or_url(first.get("b64_json"), first.get("url"))
+    except Exception as e:
+        print(f"[xAI] 图像生成 API 调用失败: {e}")
+        raise
+
+
+# ============================================================================
+# Sub2API Provider 实现 (OpenAI 兼容)
+# ============================================================================
+
+def _call_sub2api_text(
+    prompt: str,
+    api_key: str,
+    model: str,
+    base_url: str,
+    max_tokens: int = 16000,
+    temperature: float = 0.7,
+    reasoning_effort: Optional[str] = None,
+) -> Optional[str]:
+    """使用 OpenAI SDK 通过 Sub2API 调用文本模型"""
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(base_url=base_url, api_key=api_key)
+        request_kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        normalized_effort = _normalize_reasoning_effort(reasoning_effort)
+        if normalized_effort:
+            request_kwargs["extra_body"] = {"reasoning": {"effort": normalized_effort}}
+            print(f"[Sub2API] reasoning.effort={normalized_effort}")
+        completion = client.chat.completions.create(**request_kwargs)
+        return completion.choices[0].message.content if completion and completion.choices else None
+    except Exception as e:
+        print(f"[Sub2API] 文本 API 调用失败: {e}")
+        raise
+
+
+def _call_sub2api_multimodal(
+    contents: List[Any],
+    api_key: str,
+    model: str,
+    base_url: str,
+    max_tokens: int = 16000,
+    temperature: float = 0.7,
+    reasoning_effort: Optional[str] = None,
+) -> Optional[str]:
+    """使用 OpenAI SDK 通过 Sub2API 调用多模态模型"""
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(base_url=base_url, api_key=api_key)
+        message_content: List[Dict[str, Any]] = []
+        for part in contents:
+            if isinstance(part, str):
+                message_content.append({"type": "text", "text": part})
+            elif isinstance(part, Image.Image):
+                buf = io.BytesIO()
+                part.save(buf, format="PNG")
+                image_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                message_content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                    }
+                )
+
+        request_kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "user", "content": message_content}],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        normalized_effort = _normalize_reasoning_effort(reasoning_effort)
+        if normalized_effort:
+            request_kwargs["extra_body"] = {"reasoning": {"effort": normalized_effort}}
+            print(f"[Sub2API] reasoning.effort={normalized_effort}")
+        completion = client.chat.completions.create(**request_kwargs)
+        return completion.choices[0].message.content if completion and completion.choices else None
+    except Exception as e:
+        print(f"[Sub2API] 多模态 API 调用失败: {e}")
+        raise
+
+
+def _call_sub2api_image_generation(
+    prompt: str,
+    api_key: str,
+    model: str,
+    base_url: str,
+    reference_image: Optional[Image.Image] = None,
+) -> Optional[Image.Image]:
+    """通过 Sub2API 的 OpenAI 图片接口调用 gpt-image-* 模型"""
+    try:
+        if reference_image is None:
+            from openai import OpenAI
+
+            client = OpenAI(base_url=base_url, api_key=api_key)
+            response = client.images.generate(
+                model=model,
+                prompt=prompt,
+                response_format="b64_json",
+            )
+            if response and getattr(response, "data", None):
+                item = response.data[0]
+                return _load_image_from_base64_or_url(
+                    getattr(item, "b64_json", None),
+                    getattr(item, "url", None),
+                )
+            return None
+
+        buf = io.BytesIO()
+        reference_image.save(buf, format="PNG")
+        image_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "response_format": "b64_json",
+            "images": [{"image_url": f"data:image/png;base64,{image_b64}"}],
+        }
+        api_url = base_url.rstrip("/") + "/images/edits"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        response = requests.post(api_url, headers=headers, json=payload, timeout=300)
+        if response.status_code != 200:
+            raise RuntimeError(f"Sub2API 图片编辑 API 错误: {response.status_code} - {response.text[:500]}")
+
+        result = response.json()
+        items = result.get("data") or []
+        if not items:
+            return None
+        first = items[0] if isinstance(items[0], dict) else {}
+        return _load_image_from_base64_or_url(first.get("b64_json"), first.get("url"))
+    except Exception as e:
+        print(f"[Sub2API] 图像生成 API 调用失败: {e}")
+        raise
+
+
+# ============================================================================
 # 步骤一：调用 LLM 生成图片
 # ============================================================================
 
@@ -977,7 +1351,7 @@ def generate_figure_from_method(
     print("=" * 60)
     print(f"Provider: {provider}")
     print(f"模型: {model}")
-    if provider == "gemini":
+    if provider in {"gemini", "xai"}:
         print(f"分辨率: {image_size}")
 
     if use_reference_image is None:
@@ -1809,21 +2183,108 @@ def _get_hf_token() -> Optional[str]:
     return token or None
 
 
-def _has_rmbg2_cached_weights() -> bool:
-    hf_home = Path(os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface")))
-    snapshots_dir = hf_home / "hub" / "models--briaai--RMBG-2.0" / "snapshots"
-    if not snapshots_dir.exists():
+def _get_hf_home() -> Path:
+    return Path(os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface")))
+
+
+def _rmbg_snapshot_is_complete(snapshot_dir: Path) -> bool:
+    if not snapshot_dir.is_dir():
         return False
-    return any(snapshots_dir.glob("*/config.json"))
+    if not all((snapshot_dir / name).is_file() for name in RMBG_REQUIRED_CODE_FILES):
+        return False
+    return any((snapshot_dir / name).is_file() for name in RMBG_REQUIRED_WEIGHT_FILES)
 
 
-def _ensure_rmbg2_access_ready(rmbg_model_path: Optional[str]) -> None:
+def _pick_rmbg_weight_file(snapshot_dir: Path) -> Optional[str]:
+    for name in RMBG_REQUIRED_WEIGHT_FILES:
+        if (snapshot_dir / name).is_file():
+            return name
+    return None
+
+
+def _find_cached_rmbg2_snapshot() -> Optional[Path]:
+    snapshots_dir = _get_hf_home() / "hub" / "models--briaai--RMBG-2.0" / "snapshots"
+    if not snapshots_dir.exists():
+        return None
+
+    candidates = [path for path in snapshots_dir.iterdir() if _rmbg_snapshot_is_complete(path)]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _has_rmbg2_cached_weights() -> bool:
+    return _find_cached_rmbg2_snapshot() is not None
+
+
+def _prepare_rmbg2_snapshot(model_path: Optional[str]) -> Path:
+    if model_path:
+        candidate = Path(model_path)
+        if candidate.exists():
+            return candidate
+
+    cached_snapshot = _find_cached_rmbg2_snapshot()
+    if cached_snapshot is not None:
+        print(f"检测到本地 RMBG-2.0 快照: {cached_snapshot}")
+        return cached_snapshot
+
+    hf_token = _get_hf_token()
+    if hf_token is None:
+        raise RuntimeError(
+            "RMBG-2.0 首次运行需要下载完整权重，但当前未检测到 HF_TOKEN。"
+        )
+
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as e:
+        raise ImportError(
+            "未安装 huggingface_hub，无法预下载 RMBG-2.0。"
+        ) from e
+
+    print("未发现完整的 RMBG-2.0 本地快照，开始预下载所需文件...")
+    print("首次下载会比较慢，完成后会复用本地缓存，不再重复卡在第 3 步。")
+    last_error: Exception | None = None
+    for weight_file in RMBG_REQUIRED_WEIGHT_FILES:
+        try:
+            print(f"尝试预下载 RMBG-2.0 权重: {weight_file}")
+            snapshot_path = Path(
+                snapshot_download(
+                    repo_id="briaai/RMBG-2.0",
+                    token=hf_token,
+                    allow_patterns=[
+                        *RMBG_REQUIRED_CODE_FILES,
+                        weight_file,
+                    ],
+                )
+            )
+        except Exception as exc:
+            last_error = exc
+            print(f"预下载 {weight_file} 失败，准备尝试下一个候选权重。")
+            continue
+
+        cached_weight = _pick_rmbg_weight_file(snapshot_path)
+        if cached_weight is None:
+            raise RuntimeError(
+                f"RMBG-2.0 预下载结束，但快照仍不完整: {snapshot_path}"
+            )
+
+        print(f"RMBG-2.0 预下载完成: {snapshot_path} (权重: {cached_weight})")
+        return snapshot_path
+
+    if last_error is not None:
+        raise RuntimeError("RMBG-2.0 权重预下载失败。") from last_error
+    raise RuntimeError("RMBG-2.0 权重预下载失败，未找到可用权重文件。")
+
+
+def _ensure_rmbg2_access_ready(rmbg_model_path: Optional[str]) -> Optional[str]:
     if rmbg_model_path and Path(rmbg_model_path).exists():
-        return
+        return rmbg_model_path
     if _get_hf_token() is not None:
-        return
+        snapshot_path = _prepare_rmbg2_snapshot(rmbg_model_path)
+        return str(snapshot_path)
     if _has_rmbg2_cached_weights():
-        return
+        snapshot_path = _prepare_rmbg2_snapshot(rmbg_model_path)
+        return str(snapshot_path)
     raise RuntimeError(
         "步骤三需要使用 briaai/RMBG-2.0，但当前未检测到可用访问凭据。\n"
         "请先完成：\n"
@@ -1846,43 +2307,41 @@ class BriaRMBG2Remover:
         self.device = device
         hf_token = _get_hf_token()
 
-        if self.model_path and self.model_path.exists():
-            print(f"加载本地 RMBG 权重: {self.model_path}")
-            self.model = AutoModelForImageSegmentation.from_pretrained(
-                str(self.model_path), trust_remote_code=True,
-            ).eval().to(device)
-        else:
-            print("从 HuggingFace 加载 RMBG-2.0 模型...")
-            if hf_token:
-                print("检测到 HF_TOKEN，使用鉴权访问 gated 模型。")
-            else:
-                print("未检测到 HF_TOKEN，尝试匿名访问（gated 模型通常会失败）。")
+        if hf_token:
+            print("检测到 HF_TOKEN，可访问 gated 模型。")
+        elif not _has_rmbg2_cached_weights():
+            print("未检测到 HF_TOKEN，且本地没有完整缓存。")
 
-            try:
-                self.model = AutoModelForImageSegmentation.from_pretrained(
-                    self.model_repo_id,
-                    trust_remote_code=True,
-                    token=hf_token,
-                ).eval().to(device)
-            except Exception as e:
-                msg = str(e).lower()
-                is_gated = (
-                    "gated repo" in msg
-                    or "cannot access gated repo" in msg
-                    or "access to model briaai/rmbg-2.0 is restricted" in msg
-                    or "401 client error" in msg
-                    or "you are trying to access a gated repo" in msg
-                )
-                if is_gated:
-                    raise RuntimeError(
-                        "无法下载 RMBG-2.0（HuggingFace gated 模型鉴权失败）。\n"
-                        "请按以下步骤配置：\n"
-                        "1) 登录并申请模型访问权限: https://huggingface.co/briaai/RMBG-2.0\n"
-                        "2) 创建具有 Read 权限的 token\n"
-                        "3) 在项目 .env 设置 HF_TOKEN=你的token\n"
-                        "4) 重新执行: docker compose up -d --build"
-                    ) from e
-                raise
+        snapshot_or_model_path = _prepare_rmbg2_snapshot(
+            str(self.model_path) if self.model_path is not None else None
+        )
+        print(f"从本地快照加载 RMBG-2.0: {snapshot_or_model_path}")
+
+        try:
+            self.model = AutoModelForImageSegmentation.from_pretrained(
+                str(snapshot_or_model_path),
+                trust_remote_code=True,
+                local_files_only=True,
+            ).eval().to(device)
+        except Exception as e:
+            msg = str(e).lower()
+            is_gated = (
+                "gated repo" in msg
+                or "cannot access gated repo" in msg
+                or "access to model briaai/rmbg-2.0 is restricted" in msg
+                or "401 client error" in msg
+                or "you are trying to access a gated repo" in msg
+            )
+            if is_gated:
+                raise RuntimeError(
+                    "无法下载 RMBG-2.0（HuggingFace gated 模型鉴权失败）。\n"
+                    "请按以下步骤配置：\n"
+                    "1) 登录并申请模型访问权限: https://huggingface.co/briaai/RMBG-2.0\n"
+                    "2) 创建具有 Read 权限的 token\n"
+                    "3) 在项目 .env 设置 HF_TOKEN=你的token\n"
+                    "4) 重新执行: docker compose up -d --build"
+                ) from e
+            raise
 
         self.image_size = (1024, 1024)
         self.transform_image = transforms.Compose([
@@ -1910,11 +2369,70 @@ class BriaRMBG2Remover:
         return str(out_path)
 
 
+class BriaApiRMBGRemover:
+    """通过 Bria 官方 Remove Background API 调用 RMBG 2.0。"""
+
+    def __init__(self, api_key: str, output_dir: Path | str | None = None):
+        self.api_key = api_key.strip()
+        if not self.api_key:
+            raise RuntimeError("RMBG 后端选择了 Bria API，但未配置 BRIA_API_KEY。")
+        self.output_dir = Path(output_dir) if output_dir else Path("./output/icons")
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.endpoint = "https://engine.prod.bria-api.com/v2/image/edit/remove_background"
+
+    def remove_background(self, image: Image.Image, output_name: str) -> str:
+        image_rgb = image.convert("RGBA")
+        buffer = io.BytesIO()
+        image_rgb.save(buffer, format="PNG")
+        encoded_image = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+        response = requests.post(
+            self.endpoint,
+            headers={
+                "Content-Type": "application/json",
+                "api_token": self.api_key,
+            },
+            json={
+                "image": encoded_image,
+                "preserve_alpha": True,
+                "sync": True,
+                "visual_input_content_moderation": False,
+                "visual_output_content_moderation": False,
+            },
+            timeout=180,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Bria RMBG API 调用失败: HTTP {response.status_code} - {response.text[:500]}"
+            )
+        payload = response.json()
+        result = payload.get("result") if isinstance(payload, dict) else None
+        image_url = result.get("image_url") if isinstance(result, dict) else None
+        if isinstance(payload, dict):
+            image_url = image_url or payload.get("image_url")
+        if not image_url:
+            raise RuntimeError(f"Bria RMBG API 未返回 image_url: {json.dumps(payload)[:500]}")
+
+        image_response = requests.get(image_url, timeout=180)
+        if image_response.status_code >= 400:
+            raise RuntimeError(
+                f"下载 Bria RMBG 结果失败: HTTP {image_response.status_code}"
+            )
+
+        out_path = self.output_dir / f"{output_name}_nobg.png"
+        result_image = Image.open(io.BytesIO(image_response.content)).convert("RGBA")
+        result_image.save(out_path)
+        return str(out_path)
+
+
 def crop_and_remove_background(
     image_path: str,
     boxlib_path: str,
     output_dir: str,
     rmbg_model_path: Optional[str] = None,
+    rmbg_backend: RMBGBackend = "local",
+    bria_api_key: Optional[str] = None,
+    reuse_existing: bool = False,
 ) -> list[dict]:
     """
     根据 boxlib.json 裁切图片并使用 RMBG2 去背景
@@ -1939,10 +2457,19 @@ def crop_and_remove_background(
         print("警告: 没有检测到有效的 box")
         return []
 
-    remover = BriaRMBG2Remover(model_path=rmbg_model_path, output_dir=icons_dir)
+    def make_remover():
+        if rmbg_backend == "bria-api":
+            print("RMBG 后端: Bria API")
+            return BriaApiRMBGRemover(
+                api_key=bria_api_key or os.environ.get("BRIA_API_KEY", ""),
+                output_dir=icons_dir,
+            )
+        print("RMBG 后端: 本地 RMBG-2.0")
+        return BriaRMBG2Remover(model_path=rmbg_model_path, output_dir=icons_dir)
 
     icon_infos = []
-    for box_info in boxes:
+    remover = None
+    for index, box_info in enumerate(boxes, start=1):
         box_id = box_info["id"]
         label = box_info.get("label", f"<AF>{box_id + 1:02d}")
         # 将 <AF>01 转换为 AF01 用于文件名
@@ -1950,11 +2477,21 @@ def crop_and_remove_background(
 
         x1, y1, x2, y2 = box_info["x1"], box_info["y1"], box_info["x2"], box_info["y2"]
 
-        cropped = image.crop((x1, y1, x2, y2))
         crop_path = icons_dir / f"icon_{label_clean}.png"
-        cropped.save(crop_path)
+        nobg_path_obj = icons_dir / f"icon_{label_clean}_nobg.png"
+        cropped = image.crop((x1, y1, x2, y2))
 
-        nobg_path = remover.remove_background(cropped, f"icon_{label_clean}")
+        if not crop_path.is_file():
+            cropped.save(crop_path)
+
+        if reuse_existing and nobg_path_obj.is_file():
+            nobg_path = str(nobg_path_obj)
+            print(f"  {label}: 复用已有透明图标 ({index}/{len(boxes)}) -> {nobg_path}")
+        else:
+            if remover is None:
+                remover = make_remover()
+            nobg_path = remover.remove_background(cropped, f"icon_{label_clean}")
+            print(f"  {label}: 裁切并去背景完成 ({index}/{len(boxes)}) -> {nobg_path}")
 
         icon_infos.append({
             "id": box_id,
@@ -1966,9 +2503,8 @@ def crop_and_remove_background(
             "nobg_path": nobg_path,
         })
 
-        print(f"  {label}: 裁切并去背景完成 -> {nobg_path}")
-
-    del remover
+    if remover is not None:
+        del remover
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
@@ -1990,6 +2526,7 @@ def generate_svg_template(
     provider: ProviderType,
     placeholder_mode: PlaceholderMode = "label",
     no_icon_mode: bool = False,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
     """
     使用多模态 LLM 生成 SVG 代码
@@ -2005,6 +2542,8 @@ def generate_svg_template(
     print("=" * 60)
     print(f"Provider: {provider}")
     print(f"模型: {model}")
+    if provider == "sub2api" and _normalize_reasoning_effort(reasoning_effort):
+        print(f"推理强度: {reasoning_effort}")
     print(f"占位符模式: {placeholder_mode}")
     if no_icon_mode:
         print("无图标模式: 启用纯 SVG 复现回退")
@@ -2096,6 +2635,7 @@ Please output ONLY the SVG code, starting with <svg and ending with </svg>. Do n
         base_url=base_url,
         provider=provider,
         max_tokens=50000,
+        reasoning_effort=reasoning_effort,
     )
 
     if not content:
@@ -2116,6 +2656,7 @@ Please output ONLY the SVG code, starting with <svg and ending with </svg>. Do n
         model=model,
         base_url=base_url,
         provider=provider,
+        reasoning_effort=reasoning_effort,
     )
 
     output_path = Path(output_path)
@@ -2188,6 +2729,7 @@ def fix_svg_with_llm(
     base_url: str,
     provider: ProviderType,
     max_retries: int = 3,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
     """使用 LLM 修复 SVG 语法错误"""
     print("\n  " + "-" * 50)
@@ -2229,6 +2771,7 @@ IMPORTANT INSTRUCTIONS:
                 provider=provider,
                 max_tokens=16000,
                 temperature=0.3,
+                reasoning_effort=reasoning_effort,
             )
 
             if not content:
@@ -2269,6 +2812,7 @@ def check_and_fix_svg(
     model: str,
     base_url: str,
     provider: ProviderType,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
     """检查 SVG 语法并在需要时调用 LLM 修复"""
     print("\n" + "-" * 50)
@@ -2289,6 +2833,7 @@ def check_and_fix_svg(
             model=model,
             base_url=base_url,
             provider=provider,
+            reasoning_effort=reasoning_effort,
         )
         return fixed_svg
 
@@ -2628,6 +3173,7 @@ def optimize_svg_with_llm(
     max_iterations: int = 2,
     skip_base64_validation: bool = False,
     no_icon_mode: bool = False,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
     """
     使用 LLM 优化 SVG，使其与原图更加对齐
@@ -2652,6 +3198,8 @@ def optimize_svg_with_llm(
     print("=" * 60)
     print(f"Provider: {provider}")
     print(f"模型: {model}")
+    if provider == "sub2api" and _normalize_reasoning_effort(reasoning_effort):
+        print(f"推理强度: {reasoning_effort}")
     print(f"最大迭代次数: {max_iterations}")
     if no_icon_mode:
         print("无图标模式: 优化时禁止引入占位框")
@@ -2771,6 +3319,7 @@ Please carefully compare and check the following **TWO MAJOR ASPECTS with EIGHT 
                 provider=provider,
                 max_tokens=50000,
                 temperature=0.3,
+                reasoning_effort=reasoning_effort,
             )
 
             if not content:
@@ -2794,6 +3343,7 @@ Please carefully compare and check the following **TWO MAJOR ASPECTS with EIGHT 
                     model=model,
                     base_url=base_url,
                     provider=provider,
+                    reasoning_effort=reasoning_effort,
                 )
 
             if not skip_base64_validation:
@@ -2836,24 +3386,29 @@ Please carefully compare and check the following **TWO MAJOR ASPECTS with EIGHT 
 # ============================================================================
 
 def method_to_svg(
-    method_text: str,
+    method_text: Optional[str] = None,
     output_dir: str = "./output",
     api_key: str = None,
     base_url: str = None,
     provider: ProviderType = "bianxie",
     image_gen_model: str = None,
     svg_gen_model: str = None,
+    reasoning_effort: Optional[str] = None,
     sam_prompts: str = "icon",
     min_score: float = 0.5,
     sam_backend: Literal["local", "fal", "roboflow", "api"] = "local",
     sam_api_key: Optional[str] = None,
     sam_max_masks: int = 32,
     rmbg_model_path: Optional[str] = None,
+    rmbg_backend: RMBGBackend = "local",
+    bria_api_key: Optional[str] = None,
     stop_after: int = 5,
     placeholder_mode: PlaceholderMode = "label",
     optimize_iterations: int = 2,
     merge_threshold: float = 0.9,
     image_size: str = GEMINI_DEFAULT_IMAGE_SIZE,
+    source_figure_path: Optional[str] = None,
+    reuse_intermediates: bool = False,
 ) -> dict:
     """
     完整流程：Paper Method → SVG with Icons
@@ -2866,12 +3421,15 @@ def method_to_svg(
         provider: API 提供商
         image_gen_model: 生图模型
         svg_gen_model: SVG 生成模型
+        reasoning_effort: Sub2API/OpenAI 兼容推理强度（none/low/medium/high/xhigh）
         sam_prompts: SAM3 文本提示，支持逗号分隔的多个prompt（如 "icon,diagram,arrow"）
         min_score: SAM3 最低置信度
         sam_backend: SAM3 后端（local/fal/roboflow/api）
         sam_api_key: SAM3 API Key（api 模式使用）
         sam_max_masks: SAM3 API 最大 masks 数（api 模式使用）
         rmbg_model_path: RMBG 模型路径
+        rmbg_backend: RMBG 后端（local/bria-api）
+        bria_api_key: Bria API Key（rmbg_backend=bria-api 时使用）
         stop_after: 执行到指定步骤后停止
         placeholder_mode: 占位符模式
             - "none": 无特殊样式
@@ -2879,12 +3437,16 @@ def method_to_svg(
             - "label": 灰色填充+黑色边框+序号标签（推荐）
         optimize_iterations: 步骤 4.6 优化迭代次数（0 表示跳过优化）
         merge_threshold: Box合并阈值，重叠比例超过此值则合并（0表示不合并，默认0.9）
+        source_figure_path: 外部输入图片路径（提供后会跳过步骤一的文生图）
+        reuse_intermediates: 继续任务时复用已有 samed/boxlib/icons，避免重复 SAM/RMBG
 
     Returns:
         结果字典
     """
     if not api_key:
         raise ValueError("必须提供 api_key")
+    if not method_text and not source_figure_path:
+        raise ValueError("必须提供 method_text 或 source_figure_path")
 
     # 获取默认配置
     config = PROVIDER_CONFIGS[provider]
@@ -2905,31 +3467,53 @@ def method_to_svg(
     print(f"输出目录: {output_dir}")
     print(f"生图模型: {image_gen_model}")
     print(f"SVG模型: {svg_gen_model}")
+    normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
+    if provider == "sub2api" and normalized_reasoning_effort:
+        print(f"GPT推理强度: {normalized_reasoning_effort}")
     print(f"SAM提示词: {sam_prompts}")
     print(f"最低置信度: {min_score}")
     sam_backend_value = "fal" if sam_backend == "api" else sam_backend
     print(f"SAM后端: {sam_backend_value}")
     if sam_backend_value == "fal":
         print(f"SAM3 API max_masks: {sam_max_masks}")
+    print(f"RMBG 后端: {rmbg_backend}")
     print(f"执行到步骤: {stop_after}")
     print(f"占位符模式: {placeholder_mode}")
     print(f"优化迭代次数: {optimize_iterations}")
     print(f"Box合并阈值: {merge_threshold}")
-    if provider == "gemini":
+    if provider in {"gemini", "xai"}:
         print(f"生图分辨率: {image_size}")
+    if source_figure_path:
+        print(f"输入模式: image")
+        print(f"源图片: {source_figure_path}")
+    else:
+        print(f"输入模式: text")
+    if reuse_intermediates:
+        print("断点续跑: 启用中间产物复用")
     print("=" * 60)
 
     # 步骤一：生成图片
     figure_path = output_dir / "figure.png"
-    generate_figure_from_method(
-        method_text=method_text,
-        output_path=str(figure_path),
-        api_key=api_key,
-        model=image_gen_model,
-        base_url=base_url,
-        provider=provider,
-        image_size=image_size,
-    )
+    if source_figure_path:
+        source_path = Path(source_figure_path).resolve()
+        if not source_path.is_file():
+            raise ValueError(f"输入图片不存在: {source_figure_path}")
+        print("步骤一：导入外部图片作为画布源图")
+        if source_path == figure_path.resolve():
+            print(f"源图片已在输出目录，继续使用: {figure_path}")
+        else:
+            shutil.copyfile(source_path, figure_path)
+            print(f"源图片已复制到: {figure_path}")
+    else:
+        generate_figure_from_method(
+            method_text=method_text,
+            output_path=str(figure_path),
+            api_key=api_key,
+            model=image_gen_model,
+            base_url=base_url,
+            provider=provider,
+            image_size=image_size,
+        )
 
     if stop_after == 1:
         print("\n" + "=" * 60)
@@ -2946,16 +3530,29 @@ def method_to_svg(
         }
 
     # 步骤二：SAM3 分割（包含Box合并）
-    samed_path, boxlib_path, valid_boxes = segment_with_sam3(
-        image_path=str(figure_path),
-        output_dir=str(output_dir),
-        text_prompts=sam_prompts,
-        min_score=min_score,
-        merge_threshold=merge_threshold,
-        sam_backend=sam_backend_value,
-        sam_api_key=sam_api_key,
-        sam_max_masks=sam_max_masks,
-    )
+    existing_samed_path = output_dir / "samed.png"
+    existing_boxlib_path = output_dir / "boxlib.json"
+    if reuse_intermediates and existing_samed_path.is_file() and existing_boxlib_path.is_file():
+        print("\n" + "=" * 60)
+        print("步骤二：复用已有 SAM3 分割产物")
+        print("=" * 60)
+        samed_path = str(existing_samed_path)
+        boxlib_path = str(existing_boxlib_path)
+        valid_boxes = _load_existing_boxes(existing_boxlib_path)
+        print(f"复用标记图片: {samed_path}")
+        print(f"复用Box信息: {boxlib_path}")
+        print(f"复用box数量: {len(valid_boxes)}")
+    else:
+        samed_path, boxlib_path, valid_boxes = segment_with_sam3(
+            image_path=str(figure_path),
+            output_dir=str(output_dir),
+            text_prompts=sam_prompts,
+            min_score=min_score,
+            merge_threshold=merge_threshold,
+            sam_backend=sam_backend_value,
+            sam_api_key=sam_api_key,
+            sam_max_masks=sam_max_masks,
+        )
 
     no_icon_mode = len(valid_boxes) == 0
     if no_icon_mode:
@@ -2981,13 +3578,42 @@ def method_to_svg(
     icon_infos = []
     if no_icon_mode:
         print("步骤三跳过：当前为无图标回退模式")
+    elif reuse_intermediates:
+        icon_infos = _load_existing_icon_infos(output_dir)
+        if len(icon_infos) >= len(valid_boxes):
+            print("\n" + "=" * 60)
+            print("步骤三：复用已有图标裁切和透明图标")
+            print("=" * 60)
+            print(f"复用图标数量: {len(icon_infos)}")
+        else:
+            print(f"已有透明图标不完整（{len(icon_infos)}/{len(valid_boxes)}），只补齐缺失图标")
+            prepared_rmbg_model_path = (
+                _ensure_rmbg2_access_ready(rmbg_model_path)
+                if rmbg_backend == "local"
+                else None
+            )
+            icon_infos = crop_and_remove_background(
+                image_path=str(figure_path),
+                boxlib_path=boxlib_path,
+                output_dir=str(output_dir),
+                rmbg_model_path=prepared_rmbg_model_path,
+                rmbg_backend=rmbg_backend,
+                bria_api_key=bria_api_key,
+                reuse_existing=True,
+            )
     else:
-        _ensure_rmbg2_access_ready(rmbg_model_path)
+        prepared_rmbg_model_path = (
+            _ensure_rmbg2_access_ready(rmbg_model_path)
+            if rmbg_backend == "local"
+            else None
+        )
         icon_infos = crop_and_remove_background(
             image_path=str(figure_path),
             boxlib_path=boxlib_path,
             output_dir=str(output_dir),
-            rmbg_model_path=rmbg_model_path,
+            rmbg_model_path=prepared_rmbg_model_path,
+            rmbg_backend=rmbg_backend,
+            bria_api_key=bria_api_key,
         )
 
     if stop_after == 3:
@@ -3008,42 +3634,56 @@ def method_to_svg(
     template_svg_path = output_dir / "template.svg"
     optimized_template_path = output_dir / "optimized_template.svg"
     final_svg_path = output_dir / "final.svg"
-    try:
-        generate_svg_template(
-            figure_path=str(figure_path),
-            samed_path=samed_path,
-            boxlib_path=boxlib_path,
-            output_path=str(template_svg_path),
-            api_key=api_key,
-            model=svg_gen_model,
-            base_url=base_url,
-            provider=provider,
-            placeholder_mode=placeholder_mode,
-            no_icon_mode=no_icon_mode,
-        )
+    if reuse_intermediates and optimized_template_path.is_file():
+        print("\n" + "=" * 60)
+        print("步骤四：复用已有优化 SVG 模板")
+        print("=" * 60)
+        print(f"复用优化模板: {optimized_template_path}")
+    else:
+        try:
+            if reuse_intermediates and template_svg_path.is_file():
+                print("\n" + "=" * 60)
+                print("步骤四：复用已有 SVG 模板")
+                print("=" * 60)
+                print(f"复用模板: {template_svg_path}")
+            else:
+                generate_svg_template(
+                    figure_path=str(figure_path),
+                    samed_path=samed_path,
+                    boxlib_path=boxlib_path,
+                    output_path=str(template_svg_path),
+                    api_key=api_key,
+                    model=svg_gen_model,
+                    base_url=base_url,
+                    provider=provider,
+                    placeholder_mode=placeholder_mode,
+                    no_icon_mode=no_icon_mode,
+                    reasoning_effort=normalized_reasoning_effort,
+                )
 
-        # 步骤 4.6：LLM 优化 SVG 模板（可配置迭代次数，0 表示跳过）
-        optimize_svg_with_llm(
-            figure_path=str(figure_path),
-            samed_path=samed_path,
-            final_svg_path=str(template_svg_path),
-            output_path=str(optimized_template_path),
-            api_key=api_key,
-            model=svg_gen_model,
-            base_url=base_url,
-            provider=provider,
-            max_iterations=optimize_iterations,
-            skip_base64_validation=True,
-            no_icon_mode=no_icon_mode,
-        )
-    except Exception as exc:
-        if not no_icon_mode:
-            raise
-        print(f"无图标模式下 SVG 重建失败（{exc}），改用内嵌原图的保底 SVG")
-        create_embedded_figure_svg(
-            figure_path=str(figure_path),
-            output_path=str(final_svg_path),
-        )
+            # 步骤 4.6：LLM 优化 SVG 模板（可配置迭代次数，0 表示跳过）
+            optimize_svg_with_llm(
+                figure_path=str(figure_path),
+                samed_path=samed_path,
+                final_svg_path=str(template_svg_path),
+                output_path=str(optimized_template_path),
+                api_key=api_key,
+                model=svg_gen_model,
+                base_url=base_url,
+                provider=provider,
+                max_iterations=optimize_iterations,
+                skip_base64_validation=True,
+                no_icon_mode=no_icon_mode,
+                reasoning_effort=normalized_reasoning_effort,
+            )
+        except Exception as exc:
+            if not no_icon_mode:
+                raise
+            print(f"无图标模式下 SVG 重建失败（{exc}），改用内嵌原图的保底 SVG")
+            create_embedded_figure_svg(
+                figure_path=str(figure_path),
+                output_path=str(final_svg_path),
+            )
 
     if stop_after == 4:
         print("\n" + "=" * 60)
@@ -3160,6 +3800,149 @@ def create_embedded_figure_svg(
     return str(output_path_obj)
 
 
+def _load_existing_icon_infos(output_dir: Path) -> list[dict]:
+    boxlib_path = output_dir / "boxlib.json"
+    if not boxlib_path.is_file():
+        return []
+    with open(boxlib_path, "r", encoding="utf-8") as f:
+        boxlib_data = json.load(f)
+
+    icon_infos = []
+    for box_info in boxlib_data.get("boxes", []):
+        box_id = box_info["id"]
+        label = box_info.get("label", f"<AF>{box_id + 1:02d}")
+        label_clean = label.replace("<", "").replace(">", "")
+        crop_path = output_dir / "icons" / f"icon_{label_clean}.png"
+        nobg_path = output_dir / "icons" / f"icon_{label_clean}_nobg.png"
+        if not nobg_path.is_file():
+            continue
+        x1, y1, x2, y2 = box_info["x1"], box_info["y1"], box_info["x2"], box_info["y2"]
+        icon_infos.append({
+            "id": box_id,
+            "label": label,
+            "label_clean": label_clean,
+            "x1": x1,
+            "y1": y1,
+            "x2": x2,
+            "y2": y2,
+            "width": x2 - x1,
+            "height": y2 - y1,
+            "crop_path": str(crop_path),
+            "nobg_path": str(nobg_path),
+        })
+    return icon_infos
+
+
+def _load_existing_boxes(boxlib_path: Path) -> list[dict]:
+    with open(boxlib_path, "r", encoding="utf-8") as f:
+        boxlib_data = json.load(f)
+    boxes = boxlib_data.get("boxes", [])
+    return boxes if isinstance(boxes, list) else []
+
+
+def continue_optimize_existing_job(
+    output_dir: str,
+    api_key: str,
+    base_url: Optional[str],
+    provider: ProviderType,
+    svg_model: Optional[str],
+    reasoning_effort: Optional[str] = None,
+    optimize_iterations: int = 1,
+) -> dict:
+    """Continue optimizing an existing job without regenerating image/SAM artifacts."""
+    if not api_key:
+        raise ValueError("必须提供 api_key")
+    if optimize_iterations < 1:
+        raise ValueError("继续优化至少需要 1 轮")
+
+    config = PROVIDER_CONFIGS[provider]
+    if base_url is None:
+        base_url = config["base_url"]
+    if svg_model is None:
+        svg_model = config["default_svg_model"]
+
+    output_dir_path = Path(output_dir)
+    figure_path = output_dir_path / "figure.png"
+    samed_path = output_dir_path / "samed.png"
+    template_path = output_dir_path / "template.svg"
+    optimized_template_path = output_dir_path / "optimized_template.svg"
+    final_svg_path = output_dir_path / "final.svg"
+
+    if not figure_path.is_file():
+        raise FileNotFoundError(f"缺少源图: {figure_path}")
+    if not samed_path.is_file():
+        samed_path = figure_path
+
+    input_svg_path = optimized_template_path if optimized_template_path.is_file() else template_path
+    if not input_svg_path.is_file() and final_svg_path.is_file():
+        input_svg_path = final_svg_path
+    if not input_svg_path.is_file():
+        raise FileNotFoundError("缺少可继续优化的 SVG（需要 optimized_template.svg、template.svg 或 final.svg）")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if optimized_template_path.is_file():
+        shutil.copyfile(optimized_template_path, output_dir_path / f"optimized_template.before_opt_{timestamp}.svg")
+    if final_svg_path.is_file():
+        shutil.copyfile(final_svg_path, output_dir_path / f"final.before_opt_{timestamp}.svg")
+
+    icon_infos = _load_existing_icon_infos(output_dir_path)
+    no_icon_mode = len(icon_infos) == 0
+    normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
+
+    print("\n" + "=" * 60)
+    print("继续优化已有 SVG")
+    print("=" * 60)
+    print(f"Provider: {provider}")
+    print(f"SVG模型: {svg_model}")
+    if provider == "sub2api" and normalized_reasoning_effort:
+        print(f"GPT推理强度: {normalized_reasoning_effort}")
+    print(f"输入 SVG: {input_svg_path}")
+    print(f"优化轮数: {optimize_iterations}")
+    print(f"图标数量: {len(icon_infos)}")
+
+    optimize_svg_with_llm(
+        figure_path=str(figure_path),
+        samed_path=str(samed_path),
+        final_svg_path=str(input_svg_path),
+        output_path=str(optimized_template_path),
+        api_key=api_key,
+        model=svg_model,
+        base_url=base_url,
+        provider=provider,
+        max_iterations=optimize_iterations,
+        skip_base64_validation=input_svg_path != final_svg_path,
+        no_icon_mode=no_icon_mode,
+        reasoning_effort=normalized_reasoning_effort,
+    )
+
+    if no_icon_mode:
+        shutil.copyfile(optimized_template_path, final_svg_path)
+        print("无图标模式：优化模板已复制为 final.svg")
+    else:
+        figure_img = Image.open(figure_path)
+        figure_width, figure_height = figure_img.size
+        with open(optimized_template_path, "r", encoding="utf-8") as f:
+            svg_code = f.read()
+        svg_width, svg_height = get_svg_dimensions(svg_code)
+        if svg_width and svg_height and (abs(svg_width - figure_width) >= 1 or abs(svg_height - figure_height) >= 1):
+            scale_factors = calculate_scale_factors(figure_width, figure_height, svg_width, svg_height)
+        else:
+            scale_factors = (1.0, 1.0)
+        replace_icons_in_svg(
+            template_svg_path=str(optimized_template_path),
+            icon_infos=icon_infos,
+            output_path=str(final_svg_path),
+            scale_factors=scale_factors,
+            match_by_label=True,
+        )
+
+    print(f"继续优化完成: {final_svg_path}")
+    return {
+        "optimized_template_path": str(optimized_template_path),
+        "final_svg_path": str(final_svg_path),
+    }
+
+
 # ============================================================================
 # 命令行入口
 # ============================================================================
@@ -3170,9 +3953,11 @@ if __name__ == "__main__":
     )
 
     # 输入参数
-    input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument("--method_text", help="Paper method 文本内容")
-    input_group.add_argument("--method_file", default="./paper.txt", help="包含 paper method 的文本文件路径")
+    parser.add_argument("--method_text", help="Paper method 文本内容")
+    parser.add_argument("--method_file", default="./paper.txt", help="包含 paper method 的文本文件路径")
+    parser.add_argument("--source_figure_path", default=None, help="输入图片路径（提供后跳过步骤一文生图）")
+    parser.add_argument("--reuse_intermediates", action="store_true", help="复用已有 samed/boxlib/icons 断点续跑")
+    parser.add_argument("--continue_optimize", action="store_true", help="基于现有任务产物继续优化 SVG，不重新生图/SAM")
 
     # 输出参数
     parser.add_argument("--output_dir", default="./output", help="输出目录（默认: ./output）")
@@ -3180,7 +3965,7 @@ if __name__ == "__main__":
     # Provider 参数
     parser.add_argument(
         "--provider",
-        choices=["openrouter", "bianxie", "gemini"],
+        choices=["openrouter", "bianxie", "gemini", "xai", "sub2api"],
         default="bianxie",
         help="API 提供商（默认: bianxie）"
     )
@@ -3198,6 +3983,12 @@ if __name__ == "__main__":
         help="生图分辨率（可选: 1K/2K/4K，默认: 4K）",
     )
     parser.add_argument("--svg_model", default=None, help="SVG生成模型（默认根据 provider 自动设置）")
+    parser.add_argument(
+        "--reasoning_effort",
+        choices=["none", "low", "medium", "high", "xhigh"],
+        default=None,
+        help="Sub2API/OpenAI 兼容 GPT 推理强度（none/low/medium/high/xhigh）",
+    )
 
     # Step 1 参考图片参数
     parser.add_argument(
@@ -3226,6 +4017,13 @@ if __name__ == "__main__":
 
     # RMBG 参数
     parser.add_argument("--rmbg_model_path", default=None, help="RMBG 模型本地路径（可选）")
+    parser.add_argument(
+        "--rmbg_backend",
+        choices=["local", "bria-api"],
+        default=os.environ.get("AUTOFIGURE_DEFAULT_RMBG_BACKEND", "local"),
+        help="RMBG 后端：local(本地 RMBG-2.0)/bria-api(Bria 官方 API)",
+    )
+    parser.add_argument("--bria_api_key", default=None, help="Bria API Key（rmbg_backend=bria-api 时使用）")
 
     # 流程控制参数
     parser.add_argument(
@@ -3266,15 +4064,28 @@ if __name__ == "__main__":
         parser.error("--use_reference_image 需要 --reference_image_path")
     if args.reference_image_path and not Path(args.reference_image_path).is_file():
         parser.error(f"参考图片不存在: {args.reference_image_path}")
+    if args.source_figure_path and not Path(args.source_figure_path).is_file():
+        parser.error(f"输入图片不存在: {args.source_figure_path}")
+
+    if args.continue_optimize:
+        continue_optimize_existing_job(
+            output_dir=args.output_dir,
+            api_key=args.api_key,
+            base_url=args.base_url,
+            provider=args.provider,
+            svg_model=args.svg_model,
+            reasoning_effort=args.reasoning_effort,
+            optimize_iterations=args.optimize_iterations,
+        )
+        sys.exit(0)
 
     USE_REFERENCE_IMAGE = bool(args.use_reference_image)
     REFERENCE_IMAGE_PATH = args.reference_image_path
     if REFERENCE_IMAGE_PATH:
         USE_REFERENCE_IMAGE = True
 
-    # 获取 method 文本：优先使用 --method_text
     method_text = args.method_text
-    if method_text is None:
+    if args.source_figure_path is None and method_text is None:
         with open(args.method_file, 'r', encoding='utf-8') as f:
             method_text = f.read()
 
@@ -3288,14 +4099,19 @@ if __name__ == "__main__":
         image_gen_model=args.image_model,
         image_size=args.image_size,
         svg_gen_model=args.svg_model,
+        reasoning_effort=args.reasoning_effort,
         sam_prompts=args.sam_prompt,
         min_score=args.min_score,
         sam_backend=args.sam_backend,
         sam_api_key=args.sam_api_key,
         sam_max_masks=args.sam_max_masks,
         rmbg_model_path=args.rmbg_model_path,
+        rmbg_backend=args.rmbg_backend,
+        bria_api_key=args.bria_api_key,
         stop_after=args.stop_after,
         placeholder_mode=args.placeholder_mode,
         optimize_iterations=args.optimize_iterations,
         merge_threshold=args.merge_threshold,
+        source_figure_path=args.source_figure_path,
+        reuse_intermediates=args.reuse_intermediates,
     )

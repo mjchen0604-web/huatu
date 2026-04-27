@@ -34,8 +34,19 @@
   const svgEditor = new Editor(document.getElementById('container'))
   svgEditor.setConfig({
     allowInitialUserOverride: true,
-    extensions: [],
-    noDefaultExtensions: false,
+    extensions: [
+      'ext-connector',
+      'ext-eyedropper',
+      'ext-grid',
+      'ext-markers',
+      'ext-panning',
+      'ext-shapes',
+      'ext-polystar',
+      'ext-layer_view'
+    ],
+    lockExtensions: true,
+    noDefaultExtensions: true,
+    noStorageOnLoad: true,
     userExtensions: [/* { pathName: '/packages/react-test/dist/react-test.js' } */]
   })
   svgEditor.init()

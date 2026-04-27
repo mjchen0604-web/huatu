@@ -1,72 +1,54 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AutoFigure-Edit</title>
+    <title>智能画布</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=zh-20260427-snapshot-fix" />
   </head>
   <body data-page="input">
     <div class="page">
       <header class="topbar">
         <div>
-          <div class="brand">AutoFigure-Edit</div>
-          <div class="subtitle">Generate SVG templates and preview every step.</div>
+          <div class="brand">智能画布</div>
+          <div class="subtitle">将论文方法描述或已有示意图转换为可编辑 SVG 画布。</div>
         </div>
       </header>
 
       <main class="input-layout">
         <section class="card">
-          <label class="field-label" for="methodText">Method Text</label>
-          <textarea
-            id="methodText"
-            class="textarea"
-            placeholder="Paste your paper method text here..."
-          ></textarea>
-          <div class="hint">Tip: concise, structured method text yields cleaner templates.</div>
+          <div class="mode-tabs" role="group" aria-label="输入模式">
+            <button id="textModeBtn" class="mode-tab active" type="button">文本生成</button>
+            <button id="imageModeBtn" class="mode-tab" type="button">图片转画布</button>
+          </div>
+
+          <div id="methodTextGroup">
+            <label class="field-label" for="methodText">方法文本</label>
+            <textarea
+              id="methodText"
+              class="textarea"
+              placeholder="粘贴论文方法段落，越结构化越容易生成干净的模板图。"
+            ></textarea>
+            <div class="hint">建议输入方法部分原文，保留关键模块、流程顺序和箭头关系。</div>
+          </div>
+
+          <div id="sourceImageGroup" class="source-image-group" hidden>
+            <label class="field-label" for="sourceFile">源图片</label>
+            <div class="upload-zone" id="sourceUploadZone">
+              <input id="sourceFile" class="file-input" type="file" accept="image/*" />
+              <div class="upload-text">拖拽已有示意图到这里，或点击上传</div>
+            </div>
+            <div class="upload-meta">
+              <img id="sourcePreview" class="upload-preview" alt="源图片预览" />
+              <div id="sourceStatus" class="hint"></div>
+            </div>
+          </div>
         </section>
 
-        <section class="card">
-          <div class="field-group">
-            <label class="field-label" for="provider">Provider</label>
-            <select id="provider" class="input">
-              <option value="bianxie">Bianxie</option>
-              <option value="openrouter">OpenRouter</option>
-              <option value="gemini" selected>Gemini (Google)</option>
-            </select>
-          </div>
-
-          <div class="field-group">
-            <label class="field-label" for="apiKey">API Key</label>
-            <input id="apiKey" type="password" class="input" placeholder="sk-..." />
-          </div>
-
-          <div class="field-group">
-            <label class="field-label" for="optimizeIterations">Optimize</label>
-            <input id="optimizeIterations" class="input" type="number" min="0" value="0" />
-          </div>
-
-          <div class="field-group" id="imageSizeGroup">
-            <label class="field-label" for="imageSize">Image Size</label>
-            <select id="imageSize" class="input">
-              <option value="1K">1K</option>
-              <option value="2K">2K</option>
-              <option value="4K" selected>4K</option>
-            </select>
-          </div>
-
-          <div class="field-group">
-            <label class="field-label" for="samBackend">SAM3 Backend</label>
-            <select id="samBackend" class="input">
-              <option value="roboflow" selected>Roboflow API</option>
-              <option value="fal">fal.ai API</option>
-              <option value="local">Local (SAM3)</option>
-            </select>
-          </div>
-
-          <div class="field-group">
-            <label class="field-label" for="samPrompt">SAM Prompt</label>
+        <section class="card config-card">
+          <div class="field-group public-sam-prompt">
+            <label class="field-label" for="samPrompt">SAM 提示词</label>
             <input
               id="samPrompt"
               type="text"
@@ -76,36 +58,178 @@
             />
           </div>
 
-          <div class="field-group" id="samApiKeyGroup" hidden>
-            <label class="field-label" for="samApiKey">SAM3 API Key</label>
-            <input
-              id="samApiKey"
-              type="password"
-              class="input"
-              placeholder="FAL/Roboflow API key"
-            />
+          <div class="admin-unlock" id="adminUnlock">
+            <label class="field-label" for="adminPassword">管理员配置</label>
+            <div class="admin-unlock-row">
+              <input
+                id="adminPassword"
+                type="password"
+                class="input"
+                autocomplete="current-password"
+                placeholder="输入管理员密码"
+              />
+              <button id="adminUnlockBtn" class="ghost" type="button">解锁</button>
+            </div>
+            <span id="adminStatus" class="hint"></span>
+          </div>
+
+          <div id="adminConfigPanel" class="admin-config-panel" hidden>
+          <div class="field-group">
+            <label class="field-label" for="provider">模型提供商</label>
+            <select id="provider" class="input">
+              <option value="sub2api" selected>Sub2API / GPT 画图 2.0</option>
+              <option value="bianxie">Bianxie</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="gemini">Gemini (Google)</option>
+              <option value="xai">xAI / Grok</option>
+            </select>
           </div>
 
           <div class="field-group">
-            <label class="field-label" for="referenceFile">Reference Image</label>
+            <label class="field-label" for="apiKey">API Key</label>
+            <div class="secret-input">
+              <input id="apiKey" type="password" class="input" placeholder="sk-..." />
+              <button class="secret-toggle" type="button" data-secret-target="apiKey" aria-label="显示 API Key" title="显示 API Key">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="baseUrl">Base URL</label>
+            <input id="baseUrl" type="text" class="input" placeholder="http://localhost:8080/v1" />
+          </div>
+
+          <div class="field-row">
+            <div class="field-group">
+              <label class="field-label" for="imageModel">生图模型</label>
+              <input id="imageModel" type="text" class="input" placeholder="gpt-image-2" />
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="svgModel">SVG 模型</label>
+              <input id="svgModel" type="text" class="input" placeholder="gpt-5.5" />
+            </div>
+          </div>
+
+          <div class="field-group" id="reasoningEffortGroup">
+            <label class="field-label" for="reasoningEffort">GPT 推理强度</label>
+            <select id="reasoningEffort" class="input">
+              <option value="none">关闭</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high" selected>high</option>
+              <option value="xhigh">xhigh</option>
+            </select>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="optimizeIterations">优化轮数</label>
+            <input id="optimizeIterations" class="input" type="number" min="0" value="0" />
+          </div>
+
+          <div class="field-group" id="imageSizeGroup">
+            <label class="field-label" for="imageSize">图片尺寸</label>
+            <select id="imageSize" class="input">
+              <option value="1K">1K</option>
+              <option value="2K">2K</option>
+              <option value="4K" selected>4K</option>
+            </select>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="samBackend">SAM3 后端</label>
+            <select id="samBackend" class="input">
+              <option value="roboflow" selected>Roboflow API</option>
+              <option value="fal">fal.ai API</option>
+              <option value="local">本地 SAM3</option>
+            </select>
+          </div>
+
+          <div class="field-group" id="samApiKeyGroup" hidden>
+            <label class="field-label" for="samApiKey">SAM3 API Key</label>
+            <div class="secret-input">
+              <input
+                id="samApiKey"
+                type="password"
+                class="input"
+                placeholder="FAL / Roboflow API Key"
+              />
+              <button class="secret-toggle" type="button" data-secret-target="samApiKey" aria-label="显示 SAM3 API Key" title="显示 SAM3 API Key">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="rmbgBackend">RMBG 抠图后端</label>
+            <select id="rmbgBackend" class="input">
+              <option value="local" selected>本地 RMBG-2.0</option>
+              <option value="bria-api">Bria API</option>
+            </select>
+          </div>
+
+          <div class="field-group" id="briaApiKeyGroup" hidden>
+            <label class="field-label" for="briaApiKey">Bria API Key</label>
+            <div class="secret-input">
+              <input
+                id="briaApiKey"
+                type="password"
+                class="input"
+                placeholder="Bria API Key"
+              />
+              <button class="secret-toggle" type="button" data-secret-target="briaApiKey" aria-label="显示 Bria API Key" title="显示 Bria API Key">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="referenceFile">参考图片</label>
             <div class="upload-zone" id="uploadZone">
               <input id="referenceFile" class="file-input" type="file" accept="image/*" />
-              <div class="upload-text">Drop image here or click to upload</div>
+              <div class="upload-text">拖拽参考图到这里，或点击上传</div>
             </div>
             <div class="upload-meta">
-              <img id="referencePreview" class="upload-preview" alt="Reference preview" />
+              <img id="referencePreview" class="upload-preview" alt="参考图预览" />
               <div id="referenceStatus" class="hint"></div>
             </div>
+          </div>
+
+          <div class="config-actions">
+            <button id="saveConfigBtn" class="ghost" type="button">保存配置</button>
+            <span id="configStatus" class="hint"></span>
+          </div>
           </div>
         </section>
 
         <section class="actions">
-          <button id="confirmBtn" class="primary">Confirm -> Canvas</button>
+          <button id="confirmBtn" class="primary">进入智能画布</button>
           <div id="errorMsg" class="error"></div>
+        </section>
+
+        <section class="card history-card-wide">
+          <div class="history-header">
+            <div>
+              <div class="field-label">任务历史</div>
+              <div class="hint">重新打开已保存任务，或将任务移入存档。</div>
+            </div>
+            <button id="archiveToggle" class="ghost" type="button">查看存档</button>
+          </div>
+          <div id="historyList" class="history-list"></div>
+          <div id="archiveList" class="history-list archive-list" hidden></div>
         </section>
       </main>
     </div>
 
-    <script src="/app.js"></script>
+    <script src="/app.js?v=zh-20260427-snapshot-fix"></script>
   </body>
 </html>
