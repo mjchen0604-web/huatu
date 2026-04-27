@@ -109,6 +109,7 @@
     let uploadedSourcePath = null;
     let showArchive = false;
     let adminUnlocked = false;
+    let adminAuthPassword = "";
 
     async function loadServerDefaults(adminPasswordValue = null) {
       try {
@@ -133,8 +134,10 @@
           apiKey: incoming.apiKey || defaults.apiKey,
           baseUrl: incoming.baseUrl || defaults.baseUrl,
           imageModel: incoming.imageModel || defaults.imageModel,
+          imageSize: incoming.imageSize || defaults.imageSize,
           svgModel: incoming.svgModel || defaults.svgModel,
           reasoningEffort: incoming.reasoningEffort || defaults.reasoningEffort,
+          optimizeIterations: incoming.optimizeIterations || defaults.optimizeIterations,
           samBackend: incoming.samBackend || defaults.samBackend,
           samPrompt: incoming.samPrompt || defaults.samPrompt,
           samApiKey: incoming.samApiKey || defaults.samApiKey,
@@ -265,8 +268,10 @@
           "apiKey",
           "baseUrl",
           "imageModel",
+          "imageSize",
           "svgModel",
           "reasoningEffort",
+          "optimizeIterations",
           "samBackend",
           "samPrompt",
           "samApiKey",
@@ -283,6 +288,10 @@
             if (key !== "samPrompt") {
               merged[key] = defaults[key];
             }
+          }
+        } else {
+          for (const key of configKeys) {
+            merged[key] = defaults[key];
           }
         }
         return merged;
@@ -330,6 +339,59 @@
       } catch (_err) {
         if (showStatus && configStatus) {
           configStatus.textContent = "保存失败，浏览器禁止本地存储。";
+        }
+      }
+    }
+
+    function collectConfigState() {
+      return {
+        provider: $("provider")?.value ?? defaults.provider,
+        apiKey: $("apiKey")?.value ?? "",
+        baseUrl: $("baseUrl")?.value ?? defaults.baseUrl,
+        imageModel: $("imageModel")?.value ?? defaults.imageModel,
+        svgModel: $("svgModel")?.value ?? defaults.svgModel,
+        reasoningEffort: $("reasoningEffort")?.value ?? defaults.reasoningEffort,
+        optimizeIterations: $("optimizeIterations")?.value ?? defaults.optimizeIterations ?? "0",
+        imageSize: imageSizeInput?.value ?? defaults.imageSize ?? "4K",
+        samBackend: samBackend?.value ?? defaults.samBackend,
+        samPrompt: samPrompt?.value ?? defaults.samPrompt,
+        samApiKey: samApiKeyInput?.value ?? "",
+        rmbgBackend: rmbgBackend?.value ?? defaults.rmbgBackend,
+        briaApiKey: briaApiKeyInput?.value ?? "",
+      };
+    }
+
+    async function saveServerConfig() {
+      if (!adminUnlocked || !adminAuthPassword) {
+        if (configStatus) {
+          configStatus.textContent = "请先输入管理员密码解锁。";
+        }
+        return;
+      }
+      if (configStatus) {
+        configStatus.textContent = "正在保存到服务器...";
+      }
+      try {
+        const response = await fetch("/api/config/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            password: adminAuthPassword,
+            defaults: collectConfigState(),
+          }),
+        });
+        if (!response.ok) {
+          throw new Error("服务器保存失败。");
+        }
+        const config = await response.json();
+        defaults = { ...defaults, ...(config.defaults || {}) };
+        saveInputState(false);
+        if (configStatus) {
+          configStatus.textContent = "已保存到服务器，刷新后仍会保留。";
+        }
+      } catch (_err) {
+        if (configStatus) {
+          configStatus.textContent = _err.message || "服务器保存失败。";
         }
       }
     }
@@ -493,7 +555,10 @@
         loadJobHistory();
       }
     });
-    saveConfigBtn?.addEventListener("click", () => saveInputState(true));
+    saveConfigBtn?.addEventListener("click", () => {
+      saveInputState(false);
+      saveServerConfig();
+    });
     adminUnlockBtn?.addEventListener("click", async () => {
       const password = adminPassword?.value.trim() || "";
       if (!password) {
@@ -508,6 +573,7 @@
       }
       const unlocked = await loadServerDefaults(password);
       if (unlocked) {
+        adminAuthPassword = password;
         applyInputState();
         normalizeProviderState();
         syncProviderFieldVisibility(false);

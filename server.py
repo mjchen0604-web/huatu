@@ -30,6 +30,7 @@ OUTPUTS_DIR = BASE_DIR / "outputs"
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 UPLOADS_DIR = BASE_DIR / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+CONFIG_PATH = Path(os.environ.get("AUTOFIGURE_CONFIG_PATH", OUTPUTS_DIR / "config.json"))
 
 PYTHON_EXECUTABLE = os.environ.get("AUTOFIGURE_PYTHON") or sys.executable
 
@@ -187,9 +188,11 @@ def _request_value(
 def _build_continue_cmd(output_dir: Path) -> list[str]:
     meta = _read_job_meta(output_dir)
     saved_request = meta.get("request") if isinstance(meta.get("request"), dict) else {}
+    app_config = _effective_config(include_secrets=True)
     provider = (
         _request_value(saved_request, output_dir, "provider", "--provider")
         or meta.get("provider")
+        or app_config.get("provider")
         or DEFAULT_PROVIDER
     )
     provider_defaults = PROVIDER_DEFAULTS.get(provider, PROVIDER_DEFAULTS["sub2api"])
@@ -228,7 +231,7 @@ def _build_continue_cmd(output_dir: Path) -> list[str]:
     else:
         raise HTTPException(status_code=400, detail="Cannot continue: missing figure.png or method text")
 
-    api_key = os.environ.get("AUTOFIGURE_DEFAULT_API_KEY", "")
+    api_key = app_config.get("apiKey") or os.environ.get("AUTOFIGURE_DEFAULT_API_KEY", "")
     if api_key:
         cmd += ["--api_key", api_key]
     base_url = _request_value(
@@ -236,7 +239,7 @@ def _build_continue_cmd(output_dir: Path) -> list[str]:
         output_dir,
         "base_url",
         "--base_url",
-        _default_base_url() if provider == "sub2api" else provider_defaults["base_url"],
+        app_config.get("baseUrl") or (_default_base_url() if provider == "sub2api" else provider_defaults["base_url"]),
     )
     if base_url:
         cmd += ["--base_url", base_url]
@@ -245,11 +248,11 @@ def _build_continue_cmd(output_dir: Path) -> list[str]:
         output_dir,
         "image_model",
         "--image_model",
-        DEFAULT_IMAGE_MODEL if provider == "sub2api" else provider_defaults["image_model"],
+        app_config.get("imageModel") or (DEFAULT_IMAGE_MODEL if provider == "sub2api" else provider_defaults["image_model"]),
     )
     if image_model:
         cmd += ["--image_model", image_model]
-    image_size = _request_value(saved_request, output_dir, "image_size", "--image_size")
+    image_size = _request_value(saved_request, output_dir, "image_size", "--image_size", app_config.get("imageSize"))
     if image_size:
         cmd += ["--image_size", image_size]
     svg_model = _request_value(
@@ -257,7 +260,7 @@ def _build_continue_cmd(output_dir: Path) -> list[str]:
         output_dir,
         "svg_model",
         "--svg_model",
-        DEFAULT_SVG_MODEL if provider == "sub2api" else provider_defaults["svg_model"],
+        app_config.get("svgModel") or (DEFAULT_SVG_MODEL if provider == "sub2api" else provider_defaults["svg_model"]),
     )
     if svg_model:
         cmd += ["--svg_model", svg_model]
@@ -266,14 +269,21 @@ def _build_continue_cmd(output_dir: Path) -> list[str]:
         output_dir,
         "reasoning_effort",
         "--reasoning_effort",
-        DEFAULT_REASONING_EFFORT if provider == "sub2api" else None,
+        app_config.get("reasoningEffort") or (DEFAULT_REASONING_EFFORT if provider == "sub2api" else None),
     )
     if provider == "sub2api" and reasoning_effort:
         cmd += ["--reasoning_effort", reasoning_effort]
 
     cmd += [
         "--sam_prompt",
-        _request_value(saved_request, output_dir, "sam_prompt", "--sam_prompt", DEFAULT_SAM_PROMPT) or DEFAULT_SAM_PROMPT,
+        _request_value(
+            saved_request,
+            output_dir,
+            "sam_prompt",
+            "--sam_prompt",
+            app_config.get("samPrompt") or DEFAULT_SAM_PROMPT,
+        )
+        or DEFAULT_SAM_PROMPT,
         "--placeholder_mode",
         _request_value(saved_request, output_dir, "placeholder_mode", "--placeholder_mode", DEFAULT_PLACEHOLDER_MODE)
         or DEFAULT_PLACEHOLDER_MODE,
@@ -289,10 +299,16 @@ def _build_continue_cmd(output_dir: Path) -> list[str]:
             or DEFAULT_MERGE_THRESHOLD
         ),
     ]
-    sam_backend = _request_value(saved_request, output_dir, "sam_backend", "--sam_backend", DEFAULT_SAM_BACKEND)
+    sam_backend = _request_value(
+        saved_request,
+        output_dir,
+        "sam_backend",
+        "--sam_backend",
+        app_config.get("samBackend") or DEFAULT_SAM_BACKEND,
+    )
     if sam_backend:
         cmd += ["--sam_backend", sam_backend]
-    sam_api_key = _default_sam_api_key()
+    sam_api_key = app_config.get("samApiKey") or _default_sam_api_key()
     if sam_api_key:
         cmd += ["--sam_api_key", sam_api_key]
     rmbg_backend = _request_value(
@@ -300,15 +316,21 @@ def _build_continue_cmd(output_dir: Path) -> list[str]:
         output_dir,
         "rmbg_backend",
         "--rmbg_backend",
-        DEFAULT_RMBG_BACKEND,
+        app_config.get("rmbgBackend") or DEFAULT_RMBG_BACKEND,
     )
     if rmbg_backend:
         cmd += ["--rmbg_backend", rmbg_backend]
     if rmbg_backend == "bria-api":
-        bria_api_key = _default_bria_api_key() or saved_request.get("bria_api_key") or ""
+        bria_api_key = app_config.get("briaApiKey") or _default_bria_api_key() or saved_request.get("bria_api_key") or ""
         if bria_api_key:
             cmd += ["--bria_api_key", str(bria_api_key)]
-    optimize_iterations = _request_value(saved_request, output_dir, "optimize_iterations", "--optimize_iterations", "0")
+    optimize_iterations = _request_value(
+        saved_request,
+        output_dir,
+        "optimize_iterations",
+        "--optimize_iterations",
+        str(app_config.get("optimizeIterations") or "0"),
+    )
     if optimize_iterations is not None:
         cmd += ["--optimize_iterations", str(optimize_iterations)]
     return cmd
@@ -540,6 +562,10 @@ class AdminConfigRequest(BaseModel):
     password: str = ""
 
 
+class SaveConfigRequest(AdminConfigRequest):
+    defaults: dict[str, Any] = Field(default_factory=dict)
+
+
 app = FastAPI()
 
 JOBS: dict[str, Job] = {}
@@ -554,15 +580,57 @@ def _admin_password() -> str:
     return os.environ.get("AUTOFIGURE_ADMIN_PASSWORD") or os.environ.get("AUTOFIGURE_DEFAULT_API_KEY", "")
 
 
-def _config_payload(include_secrets: bool = False) -> dict[str, Any]:
-    available, rel_path = _resolve_svg_edit_path()
+CONFIG_FIELDS = {
+    "provider",
+    "apiKey",
+    "baseUrl",
+    "imageModel",
+    "imageSize",
+    "svgModel",
+    "reasoningEffort",
+    "optimizeIterations",
+    "samBackend",
+    "samPrompt",
+    "samApiKey",
+    "rmbgBackend",
+    "briaApiKey",
+}
+SECRET_CONFIG_FIELDS = {"apiKey", "samApiKey", "briaApiKey"}
+
+
+def _read_saved_config() -> dict[str, Any]:
+    if not CONFIG_PATH.is_file():
+        return {}
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    defaults = data.get("defaults")
+    if isinstance(defaults, dict):
+        return {key: value for key, value in defaults.items() if key in CONFIG_FIELDS}
+    return {key: value for key, value in data.items() if key in CONFIG_FIELDS}
+
+
+def _write_saved_config(defaults: dict[str, Any]) -> None:
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(
+        json.dumps({"defaults": defaults}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _env_config(include_secrets: bool = False) -> dict[str, Any]:
     defaults = {
         "provider": DEFAULT_PROVIDER,
         "apiKey": "",
         "baseUrl": _default_base_url(),
         "imageModel": DEFAULT_IMAGE_MODEL,
+        "imageSize": os.environ.get("AUTOFIGURE_DEFAULT_IMAGE_SIZE", "4K"),
         "svgModel": DEFAULT_SVG_MODEL,
         "reasoningEffort": DEFAULT_REASONING_EFFORT,
+        "optimizeIterations": os.environ.get("AUTOFIGURE_DEFAULT_OPTIMIZE_ITERATIONS", "0"),
         "samBackend": DEFAULT_SAM_BACKEND,
         "samPrompt": os.environ.get("AUTOFIGURE_DEFAULT_SAM_PROMPT", DEFAULT_SAM_PROMPT),
         "samApiKey": "",
@@ -577,11 +645,49 @@ def _config_payload(include_secrets: bool = False) -> dict[str, Any]:
                 "briaApiKey": _default_bria_api_key(),
             }
         )
+    return defaults
+
+
+def _effective_config(include_secrets: bool = False) -> dict[str, Any]:
+    defaults = _env_config(include_secrets=True)
+    saved = _read_saved_config()
+    for key, value in saved.items():
+        if value is not None:
+            defaults[key] = value
+    if not include_secrets:
+        for key in SECRET_CONFIG_FIELDS:
+            defaults[key] = ""
+    return defaults
+
+
+def _config_payload(include_secrets: bool = False) -> dict[str, Any]:
+    available, rel_path = _resolve_svg_edit_path()
     return {
         "svgEditAvailable": available,
         "svgEditPath": rel_path,
-        "defaults": defaults,
+        "defaults": _effective_config(include_secrets=include_secrets),
     }
+
+
+def _apply_saved_config_to_env(defaults: dict[str, Any]) -> None:
+    mapping = {
+        "apiKey": "AUTOFIGURE_DEFAULT_API_KEY",
+        "baseUrl": "AUTOFIGURE_DEFAULT_BASE_URL",
+        "imageModel": "AUTOFIGURE_DEFAULT_IMAGE_MODEL",
+        "imageSize": "AUTOFIGURE_DEFAULT_IMAGE_SIZE",
+        "svgModel": "AUTOFIGURE_DEFAULT_SVG_MODEL",
+        "reasoningEffort": "AUTOFIGURE_DEFAULT_REASONING_EFFORT",
+        "optimizeIterations": "AUTOFIGURE_DEFAULT_OPTIMIZE_ITERATIONS",
+        "samBackend": "AUTOFIGURE_DEFAULT_SAM_BACKEND",
+        "samPrompt": "AUTOFIGURE_DEFAULT_SAM_PROMPT",
+        "samApiKey": "AUTOFIGURE_DEFAULT_SAM_API_KEY",
+        "rmbgBackend": "AUTOFIGURE_DEFAULT_RMBG_BACKEND",
+        "briaApiKey": "BRIA_API_KEY",
+    }
+    for key, env_name in mapping.items():
+        value = defaults.get(key)
+        if value is not None:
+            os.environ[env_name] = str(value)
 
 
 @app.get("/api/config")
@@ -594,6 +700,25 @@ def get_admin_config(req: AdminConfigRequest) -> JSONResponse:
     expected = _admin_password()
     if not expected or not hmac.compare_digest(req.password, expected):
         raise HTTPException(status_code=401, detail="Invalid admin password")
+    return JSONResponse(_config_payload(include_secrets=True))
+
+
+@app.post("/api/config/save")
+def save_config(req: SaveConfigRequest) -> JSONResponse:
+    expected = _admin_password()
+    if not expected or not hmac.compare_digest(req.password, expected):
+        raise HTTPException(status_code=401, detail="Invalid admin password")
+
+    current = _effective_config(include_secrets=True)
+    incoming = {
+        key: value
+        for key, value in req.defaults.items()
+        if key in CONFIG_FIELDS and isinstance(value, (str, int, float, bool))
+    }
+    for key, value in incoming.items():
+        current[key] = str(value).strip() if isinstance(value, str) else value
+    _write_saved_config(current)
+    _apply_saved_config_to_env(current)
     return JSONResponse(_config_payload(include_secrets=True))
 
 
@@ -788,6 +913,7 @@ def run_job(req: RunRequest) -> JSONResponse:
     job_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
     output_dir = OUTPUTS_DIR / job_id
     output_dir.mkdir(parents=True, exist_ok=True)
+    app_config = _effective_config(include_secrets=True)
 
     input_mode = (req.input_mode or "text").strip().lower()
     if input_mode not in {"text", "image"}:
@@ -808,17 +934,23 @@ def run_job(req: RunRequest) -> JSONResponse:
         if not source_candidate.is_file():
             raise HTTPException(status_code=400, detail="Source image not found")
 
-    provider = (req.provider or DEFAULT_PROVIDER).strip() or DEFAULT_PROVIDER
+    provider = (req.provider or str(app_config.get("provider") or DEFAULT_PROVIDER)).strip() or DEFAULT_PROVIDER
     provider_defaults = PROVIDER_DEFAULTS.get(provider, PROVIDER_DEFAULTS["sub2api"])
-    api_key = req.api_key or os.environ.get("AUTOFIGURE_DEFAULT_API_KEY", "")
-    base_url = req.base_url or (_default_base_url() if provider == "sub2api" else provider_defaults["base_url"])
+    api_key = req.api_key or app_config.get("apiKey") or os.environ.get("AUTOFIGURE_DEFAULT_API_KEY", "")
+    base_url = req.base_url or app_config.get("baseUrl") or (
+        _default_base_url() if provider == "sub2api" else provider_defaults["base_url"]
+    )
     image_model = req.image_model or (
-        DEFAULT_IMAGE_MODEL if provider == "sub2api" else provider_defaults["image_model"]
+        app_config.get("imageModel") or DEFAULT_IMAGE_MODEL
+        if provider == "sub2api"
+        else provider_defaults["image_model"]
     )
     svg_model = req.svg_model or (
-        DEFAULT_SVG_MODEL if provider == "sub2api" else provider_defaults["svg_model"]
+        app_config.get("svgModel") or DEFAULT_SVG_MODEL
+        if provider == "sub2api"
+        else provider_defaults["svg_model"]
     )
-    reasoning_effort = req.reasoning_effort
+    reasoning_effort = req.reasoning_effort or app_config.get("reasoningEffort")
     if provider == "sub2api" and not reasoning_effort:
         reasoning_effort = DEFAULT_REASONING_EFFORT
 
@@ -841,14 +973,15 @@ def run_job(req: RunRequest) -> JSONResponse:
         cmd += ["--base_url", base_url]
     if image_model:
         cmd += ["--image_model", image_model]
-    if req.image_size:
-        cmd += ["--image_size", req.image_size]
+    image_size = req.image_size or app_config.get("imageSize")
+    if image_size:
+        cmd += ["--image_size", str(image_size)]
     if svg_model:
         cmd += ["--svg_model", svg_model]
     if reasoning_effort:
         cmd += ["--reasoning_effort", reasoning_effort]
 
-    sam_prompt = req.sam_prompt or DEFAULT_SAM_PROMPT
+    sam_prompt = req.sam_prompt or app_config.get("samPrompt") or DEFAULT_SAM_PROMPT
     placeholder_mode = req.placeholder_mode or DEFAULT_PLACEHOLDER_MODE
     merge_threshold = (
         req.merge_threshold if req.merge_threshold is not None else DEFAULT_MERGE_THRESHOLD
@@ -857,22 +990,27 @@ def run_job(req: RunRequest) -> JSONResponse:
     cmd += ["--sam_prompt", sam_prompt]
     cmd += ["--placeholder_mode", placeholder_mode]
     cmd += ["--merge_threshold", str(merge_threshold)]
-    sam_backend = req.sam_backend or DEFAULT_SAM_BACKEND
+    sam_backend = req.sam_backend or app_config.get("samBackend") or DEFAULT_SAM_BACKEND
     if sam_backend:
         cmd += ["--sam_backend", sam_backend]
-    sam_api_key = req.sam_api_key or _default_sam_api_key()
+    sam_api_key = req.sam_api_key or app_config.get("samApiKey") or _default_sam_api_key()
     if sam_api_key:
         cmd += ["--sam_api_key", sam_api_key]
     if req.sam_max_masks is not None:
         cmd += ["--sam_max_masks", str(req.sam_max_masks)]
-    rmbg_backend = req.rmbg_backend or DEFAULT_RMBG_BACKEND
+    rmbg_backend = req.rmbg_backend or app_config.get("rmbgBackend") or DEFAULT_RMBG_BACKEND
     if rmbg_backend:
         cmd += ["--rmbg_backend", rmbg_backend]
-    bria_api_key = req.bria_api_key or _default_bria_api_key()
+    bria_api_key = req.bria_api_key or app_config.get("briaApiKey") or _default_bria_api_key()
     if rmbg_backend == "bria-api" and bria_api_key:
         cmd += ["--bria_api_key", bria_api_key]
-    if req.optimize_iterations is not None:
-        cmd += ["--optimize_iterations", str(req.optimize_iterations)]
+    optimize_iterations = (
+        req.optimize_iterations
+        if req.optimize_iterations is not None
+        else app_config.get("optimizeIterations")
+    )
+    if optimize_iterations is not None:
+        cmd += ["--optimize_iterations", str(optimize_iterations)]
 
     reference_path = req.reference_image_path
     if reference_path:
