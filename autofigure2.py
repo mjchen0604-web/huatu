@@ -2563,6 +2563,9 @@ def generate_svg_template(
 - 不要凭空生成图标框、占位组或额外装饰
 - 所有可见内容都应直接用 SVG 元素复现
 - 优先保持整体布局、文字、箭头、线条、边框和配色与原图一致
+- 为 Photoshop 分层导出服务：每个主要语义区域或视觉模块必须用顶层 <g> 分组包裹
+- 每个顶层分组都要有稳定的 id 和 data-layer-name，例如 <g id="layer_title" data-layer-name="Title">
+- 分组只负责组织层级，不要改变任何元素位置
 
 CRITICAL DIMENSION REQUIREMENT:
 - The original image has dimensions: {figure_width} x {figure_height} pixels
@@ -2586,6 +2589,12 @@ CRITICAL DIMENSION REQUIREMENT:
   - Set viewBox="0 0 {figure_width} {figure_height}"
   - Set width="{figure_width}" height="{figure_height}"
 - DO NOT scale or resize the SVG
+
+LAYERING REQUIREMENT FOR PSD EXPORT:
+- Wrap each major semantic region/module in a top-level <g> group.
+- Each top-level group must have a stable id and data-layer-name, for example <g id="layer_pipeline" data-layer-name="Pipeline">
+- Keep text, arrows, panels, charts, labels, and placeholders in the group that visually owns them.
+- Grouping must not change coordinates or visual appearance.
 """
 
     if not no_icon_mode and placeholder_mode == "box":
@@ -2622,6 +2631,8 @@ Please output ONLY the SVG code, starting with <svg and ending with </svg>. Do n
 
     elif not no_icon_mode:  # none 模式
         prompt_text = base_prompt + """
+Because placeholder_mode is none, do not create gray icon placeholders or AF labels. Reconstruct visible content directly with SVG shapes/text/images.
+
 Please output ONLY the SVG code, starting with <svg and ending with </svg>. Do not include any explanation or markdown formatting."""
 
     contents = [prompt_text, figure_img, samed_img]
@@ -3259,6 +3270,7 @@ Please carefully compare and optimize:
 2. Text positions, font sizes, and colors
 3. Arrows, connectors, borders, and strokes
 4. Shapes, grouping, and visual hierarchy
+5. Preserve or improve semantic top-level <g> groups for PSD export. Each major visual module should remain grouped with id and data-layer-name.
 
 **CURRENT SVG CODE:**
 ```xml
@@ -3271,6 +3283,7 @@ Please carefully compare and optimize:
 - Do NOT include markdown formatting or explanations
 - No valid icon placeholders exist for this figure
 - Do NOT add gray rectangles, AF labels, placeholder groups, or synthetic icon boxes
+- Preserve meaningful top-level SVG groups for layered PSD export
 - Focus on position and style corrections"""
         else:
             prompt = f"""You are an expert SVG optimizer. Compare the current SVG rendering with the original figure and optimize the SVG code to better match the original.
@@ -3305,6 +3318,7 @@ Please carefully compare and check the following **TWO MAJOR ASPECTS with EIGHT 
 - Start with <svg and end with </svg>
 - Do NOT include markdown formatting or explanations
 - Keep all icon placeholder structures intact (the <g> elements with id like "AF01")
+- Preserve meaningful top-level SVG groups and data-layer-name attributes for layered PSD export
 - Focus on position and style corrections"""
 
         contents = [prompt, figure_img, samed_img, current_png_img]
@@ -3409,6 +3423,7 @@ def method_to_svg(
     image_size: str = GEMINI_DEFAULT_IMAGE_SIZE,
     source_figure_path: Optional[str] = None,
     reuse_intermediates: bool = False,
+    gpt_only: bool = False,
 ) -> dict:
     """
     完整流程：Paper Method → SVG with Icons
@@ -3439,6 +3454,7 @@ def method_to_svg(
         merge_threshold: Box合并阈值，重叠比例超过此值则合并（0表示不合并，默认0.9）
         source_figure_path: 外部输入图片路径（提供后会跳过步骤一的文生图）
         reuse_intermediates: 继续任务时复用已有 samed/boxlib/icons，避免重复 SAM/RMBG
+        gpt_only: 跳过 SAM/RMBG，只用 GPT 根据整图重构 SVG
 
     Returns:
         结果字典
@@ -3490,6 +3506,8 @@ def method_to_svg(
         print(f"输入模式: text")
     if reuse_intermediates:
         print("断点续跑: 启用中间产物复用")
+    if gpt_only:
+        print("GPT-only 模式: 跳过 SAM/RMBG，直接重构 SVG 并导出分层 PSD")
     print("=" * 60)
 
     # 步骤一：生成图片
@@ -3532,7 +3550,15 @@ def method_to_svg(
     # 步骤二：SAM3 分割（包含Box合并）
     existing_samed_path = output_dir / "samed.png"
     existing_boxlib_path = output_dir / "boxlib.json"
-    if reuse_intermediates and existing_samed_path.is_file() and existing_boxlib_path.is_file():
+    if gpt_only:
+        print("\n" + "=" * 60)
+        print("步骤二跳过：GPT-only 模式不调用 SAM/Roboflow")
+        print("=" * 60)
+        samed_path = str(figure_path)
+        boxlib_path = str(existing_boxlib_path)
+        existing_boxlib_path.write_text("[]", encoding="utf-8")
+        valid_boxes = []
+    elif reuse_intermediates and existing_samed_path.is_file() and existing_boxlib_path.is_file():
         print("\n" + "=" * 60)
         print("步骤二：复用已有 SAM3 分割产物")
         print("=" * 60)
@@ -3554,7 +3580,7 @@ def method_to_svg(
             sam_max_masks=sam_max_masks,
         )
 
-    no_icon_mode = len(valid_boxes) == 0
+    no_icon_mode = gpt_only or len(valid_boxes) == 0
     if no_icon_mode:
         print("\n警告: 没有检测到有效的图标，切换到纯 SVG 回退模式")
     else:
@@ -4041,6 +4067,11 @@ if __name__ == "__main__":
         default="label",
         help="占位符模式：none(无样式)/box(传坐标)/label(序号匹配)（默认: label）"
     )
+    parser.add_argument(
+        "--gpt_only",
+        action="store_true",
+        help="跳过 SAM/RMBG，只用 GPT 根据整张原图生成/重构 SVG",
+    )
 
     # 步骤 4.6 优化迭代次数参数
     parser.add_argument(
@@ -4114,4 +4145,5 @@ if __name__ == "__main__":
         merge_threshold=args.merge_threshold,
         source_figure_path=args.source_figure_path,
         reuse_intermediates=args.reuse_intermediates,
+        gpt_only=args.gpt_only,
     )

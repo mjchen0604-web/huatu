@@ -1128,6 +1128,8 @@
       icon_nobg: { step: 3, label: "去背景完成" },
       template_svg: { step: 4, label: "模板 SVG 已生成" },
       final_svg: { step: 5, label: "最终 SVG 已生成" },
+      final_psd: { step: 5, label: "分层 PSD 已生成" },
+      layers_zip: { step: 5, label: "图层包已生成" },
       optimized_template_svg: { step: 4, label: "优化 SVG 已生成" },
     };
 
@@ -1360,10 +1362,18 @@
     card.target = "_blank";
     card.rel = "noreferrer";
 
-    const img = document.createElement("img");
-    img.src = data.url;
-    img.alt = data.name;
-    img.loading = "lazy";
+    const preview = document.createElement("div");
+    preview.className = "artifact-preview";
+    const canPreview = /\.(png|jpe?g|webp|gif|svg)$/i.test(data.name || data.url || "");
+    if (canPreview) {
+      const img = document.createElement("img");
+      img.src = data.url;
+      img.alt = data.name;
+      img.loading = "lazy";
+      preview.appendChild(img);
+    } else {
+      preview.textContent = artifactExtension(data.name);
+    }
 
     const meta = document.createElement("div");
     meta.className = "artifact-meta";
@@ -1378,9 +1388,14 @@
 
     meta.appendChild(name);
     meta.appendChild(badge);
-    card.appendChild(img);
+    card.appendChild(preview);
     card.appendChild(meta);
     container.prepend(card);
+  }
+
+  function artifactExtension(name) {
+    const ext = String(name || "").split(".").pop();
+    return ext ? ext.toUpperCase() : "FILE";
   }
 
   function formatKind(kind) {
@@ -1399,6 +1414,10 @@
         return "模板";
       case "final_svg":
         return "最终图";
+      case "final_psd":
+        return "分层 PSD";
+      case "layers_zip":
+        return "图层包";
       case "log":
         return "日志";
       default:

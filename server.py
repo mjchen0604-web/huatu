@@ -23,6 +23,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from psd_export import export_layered_psd_from_svg
+
 
 BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
@@ -299,6 +301,9 @@ def _build_continue_cmd(output_dir: Path) -> list[str]:
             or DEFAULT_MERGE_THRESHOLD
         ),
     ]
+    gpt_only = saved_request.get("gpt_only")
+    if gpt_only is True or str(gpt_only).lower() == "true":
+        cmd += ["--gpt_only"]
     sam_backend = _request_value(
         saved_request,
         output_dir,
@@ -434,6 +439,10 @@ def _classify_artifact(rel_path: str) -> str:
         return "optimized_template_svg"
     if rel_path == "final.svg":
         return "final_svg"
+    if rel_path == "final.psd":
+        return "final_psd"
+    if rel_path == "layers.zip":
+        return "layers_zip"
     if rel_path == "run.log":
         return "log"
     return "artifact"
@@ -446,6 +455,8 @@ def _collect_artifacts(output_dir: Path) -> list[dict[str, str]]:
         output_dir / "template.svg",
         output_dir / "optimized_template.svg",
         output_dir / "final.svg",
+        output_dir / "final.psd",
+        output_dir / "layers.zip",
         output_dir / "run.log",
     ]
     icons_dir = output_dir / "icons"
@@ -466,6 +477,33 @@ def _collect_artifacts(output_dir: Path) -> list[dict[str, str]]:
             }
         )
     return artifacts
+
+
+def _ensure_psd_artifacts(output_dir: Path, job: Optional["Job"] = None) -> None:
+    final_svg = output_dir / "final.svg"
+    if not final_svg.is_file():
+        return
+    final_psd = output_dir / "final.psd"
+    layers_zip = output_dir / "layers.zip"
+    if final_psd.is_file() and layers_zip.is_file():
+        return
+    try:
+        result = export_layered_psd_from_svg(
+            final_svg,
+            psd_path=final_psd,
+            layers_zip_path=layers_zip,
+        )
+        message = f"分层 PSD 已生成: {result['layer_count']} 层 -> {final_psd}"
+        if job is not None:
+            job.write_log("system", message)
+            job.push("log", {"stream": "system", "line": message})
+    except Exception as exc:
+        message = f"分层 PSD 生成失败: {exc}"
+        if job is not None:
+            job.write_log("system", message)
+            job.push("log", {"stream": "system", "line": message})
+        else:
+            print(message)
 
 
 def _infer_job_state(output_dir: Path, meta: dict[str, Any]) -> tuple[str, Optional[int]]:
@@ -544,6 +582,7 @@ class RunRequest(BaseModel):
     rmbg_backend: Optional[str] = None
     bria_api_key: Optional[str] = None
     placeholder_mode: Optional[str] = None
+    gpt_only: Optional[bool] = True
     merge_threshold: Optional[float] = None
     optimize_iterations: Optional[int] = None
     reference_image_path: Optional[str] = None
@@ -760,6 +799,20 @@ def archive_job(job_id: str, req: ArchiveRequest) -> JSONResponse:
     output_dir = _resolve_job_output_dir(job_id)
     _update_job_meta(output_dir, archived=bool(req.archived))
     return JSONResponse(_build_job_summary(output_dir))
+
+
+@app.post("/api/jobs/{job_id}/export-psd")
+def export_job_psd(job_id: str) -> JSONResponse:
+    output_dir = _resolve_job_output_dir(job_id)
+    if not (output_dir / "final.svg").is_file():
+        raise HTTPException(status_code=400, detail="Cannot export PSD: missing final.svg")
+    _ensure_psd_artifacts(output_dir)
+    artifacts = [
+        artifact
+        for artifact in _collect_artifacts(output_dir)
+        if artifact["kind"] in {"final_psd", "layers_zip"}
+    ]
+    return JSONResponse({"job_id": job_id, "artifacts": artifacts})
 
 
 @app.delete("/api/jobs/{job_id}")
@@ -995,6 +1048,8 @@ def run_job(req: RunRequest) -> JSONResponse:
 
     cmd += ["--sam_prompt", sam_prompt]
     cmd += ["--placeholder_mode", placeholder_mode]
+    if req.gpt_only is not False:
+        cmd += ["--gpt_only"]
     cmd += ["--merge_threshold", str(merge_threshold)]
     sam_backend = req.sam_backend or app_config.get("samBackend") or DEFAULT_SAM_BACKEND
     if sam_backend:
@@ -1287,8 +1342,10 @@ def _monitor_job(job: Job) -> None:
         finished_at=datetime.now().isoformat(),
         return_code=job.process.returncode,
     )
+    if job.process.returncode == 0:
+        _ensure_psd_artifacts(job.output_dir, job)
     for artifact in _collect_artifacts(job.output_dir):
-        if artifact["kind"] in {"optimized_template_svg", "final_svg"}:
+        if artifact["kind"] in {"optimized_template_svg", "final_svg", "final_psd", "layers_zip"}:
             job.push("artifact", artifact)
     job.push("status", {"state": "finished", "code": job.process.returncode})
     job.push(
