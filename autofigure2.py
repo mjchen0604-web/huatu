@@ -2515,6 +2515,63 @@ def crop_and_remove_background(
 # 步骤四：多模态调用生成 SVG
 # ============================================================================
 
+def _build_semantic_svg_prompt(figure_width: int, figure_height: int) -> str:
+    """Build the GPT-only prompt for editable, element-level SVG reconstruction."""
+    return f"""编写 SVG 代码来尽可能像素级复现这张图片，并且输出必须是可编辑的结构化 SVG。
+
+当前是 GPT-only 语义 SVG 模式：
+- 不调用 SAM/Roboflow/RMBG
+- 不要添加任何灰色矩形占位符
+- 不要添加任何 <AF>01 / <AF>02 标签
+- 所有可见内容都应直接用 SVG 元素复现
+
+ELEMENT-LEVEL EDITABILITY REQUIREMENTS:
+- each visible element must be its own editable SVG element or small <g> group
+- Do not embed the original raster image
+- Do not use a single full-canvas <image> tag as the drawing
+- text must be real <text> elements, not baked into raster images
+- basic shapes must be editable SVG shapes: <rect>, <circle>, <ellipse>, <path>, <line>, <polyline>, <polygon>
+- arrows and connector lines must be editable SVG paths/lines with marker definitions when needed
+- charts, rings, panels, labels, icons, legends, and callouts should be separated into meaningful <g> groups
+- Each meaningful group must have stable id and data-layer-name attributes, for example:
+  <g id="layer_domains_ring" data-layer-name="Domains Ring">
+  <g id="layer_label_energy" data-layer-name="Label Energy">
+  <g id="layer_arrow_australia_rainfall" data-layer-name="Arrow Australia Rainfall">
+- If a component contains multiple editable sub-elements, keep them as separate child SVG elements inside that group
+- Preserve original relative positions exactly; do not redesign the layout
+
+VISUAL MATCH REQUIREMENTS:
+- Match the overall layout, text, arrows, lines, borders, colors, and spacing as closely as possible
+- Keep white background as an editable white <rect> at the bottom
+- Prefer SVG text and vector primitives even if they are approximate; only use raster <image> for extremely complex photo-like areas, and never for the whole original image
+
+CRITICAL DIMENSION REQUIREMENT:
+- The original image has dimensions: {figure_width} x {figure_height} pixels
+- Your SVG MUST use these EXACT dimensions:
+  - Set viewBox="0 0 {figure_width} {figure_height}"
+  - Set width="{figure_width}" height="{figure_height}"
+- DO NOT scale or resize the SVG
+
+Image reference notes:
+- Image 1 is the original target figure.
+- Image 2 is the same image used only as a secondary reference. It does not contain any valid icon placeholder boxes for this run.
+
+Please output ONLY the SVG code, starting with <svg and ending with </svg>. Do not include any explanation or markdown formatting."""
+
+
+def _looks_like_raster_only_svg(svg_code: str) -> bool:
+    """Return True when an SVG is basically one embedded bitmap instead of editable vectors."""
+    image_count = len(re.findall(r"<image\b", svg_code, flags=re.IGNORECASE))
+    editable_count = len(
+        re.findall(
+            r"<(?:text|path|rect|circle|ellipse|line|polyline|polygon)\b",
+            svg_code,
+            flags=re.IGNORECASE,
+        )
+    )
+    return image_count > 0 and editable_count <= 3
+
+
 def generate_svg_template(
     figure_path: str,
     samed_path: str,
@@ -2555,30 +2612,7 @@ def generate_svg_template(
     print(f"原图尺寸: {figure_width} x {figure_height}")
 
     if no_icon_mode:
-        prompt_text = f"""编写 SVG 代码来尽可能像素级复现这张图片。
-
-当前 SAM3 没有检测到任何有效图标，因此这是一个无图标回退模式任务：
-- 不要添加任何灰色矩形占位符
-- 不要添加任何 <AF>01 / <AF>02 标签
-- 不要凭空生成图标框、占位组或额外装饰
-- 所有可见内容都应直接用 SVG 元素复现
-- 优先保持整体布局、文字、箭头、线条、边框和配色与原图一致
-- 为 Photoshop 分层导出服务：每个主要语义区域或视觉模块必须用顶层 <g> 分组包裹
-- 每个顶层分组都要有稳定的 id 和 data-layer-name，例如 <g id="layer_title" data-layer-name="Title">
-- 分组只负责组织层级，不要改变任何元素位置
-
-CRITICAL DIMENSION REQUIREMENT:
-- The original image has dimensions: {figure_width} x {figure_height} pixels
-- Your SVG MUST use these EXACT dimensions:
-  - Set viewBox="0 0 {figure_width} {figure_height}"
-  - Set width="{figure_width}" height="{figure_height}"
-- DO NOT scale or resize the SVG
-
-Image reference notes:
-- Image 1 is the original target figure.
-- Image 2 is the SAM reference image. It does not contain any valid icon placeholder boxes for this run.
-
-Please output ONLY the SVG code, starting with <svg and ending with </svg>. Do not include any explanation or markdown formatting."""
+        prompt_text = _build_semantic_svg_prompt(figure_width, figure_height)
     else:
         # 基础 prompt
         base_prompt = f"""编写svg代码来实现像素级别的复现这张图片（除了图标用相同大小的矩形占位符填充之外其他文字和组件(尤其是箭头样式)都要保持一致（即灰色矩形覆盖的内容就是图标））
@@ -2637,28 +2671,53 @@ Please output ONLY the SVG code, starting with <svg and ending with </svg>. Do n
 
     contents = [prompt_text, figure_img, samed_img]
 
-    print(f"发送多模态请求到: {base_url}")
+    svg_code = None
+    max_generation_attempts = 2 if no_icon_mode else 1
+    for attempt in range(max_generation_attempts):
+        if attempt:
+            print("检测到整图位图 SVG，重新请求 GPT 输出可编辑矢量 SVG")
+            retry_prompt = prompt_text + """
 
-    content = call_llm_multimodal(
-        contents=contents,
-        api_key=api_key,
-        model=model,
-        base_url=base_url,
-        provider=provider,
-        max_tokens=50000,
-        reasoning_effort=reasoning_effort,
-    )
+Your previous output was not acceptable because it embedded the original image as a bitmap.
+Regenerate the figure as editable vector SVG:
+- no full-canvas <image>
+- real <text> for labels
+- vector shapes/paths for rings, arrows, panels, legends, and charts
+- each element should be independently selectable/editable
+"""
+            contents = [retry_prompt, figure_img, samed_img]
 
-    if not content:
-        raise Exception(
-            f"API 响应中没有内容（provider={provider}, model={model}）。"
-            "如果是 OpenRouter，可尝试增大 OPENROUTER_MULTIMODAL_RETRIES 后重试。"
+        print(f"发送多模态请求到: {base_url}")
+
+        content = call_llm_multimodal(
+            contents=contents,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            provider=provider,
+            max_tokens=50000,
+            reasoning_effort=reasoning_effort,
         )
 
-    svg_code = extract_svg_code(content)
+        if not content:
+            raise Exception(
+                f"API 响应中没有内容（provider={provider}, model={model}）。"
+                "如果是 OpenRouter，可尝试增大 OPENROUTER_MULTIMODAL_RETRIES 后重试。"
+            )
 
-    if not svg_code:
-        raise Exception('无法从响应中提取 SVG 代码')
+        svg_code = extract_svg_code(content)
+
+        if not svg_code:
+            raise Exception('无法从响应中提取 SVG 代码')
+
+        if no_icon_mode and _looks_like_raster_only_svg(svg_code):
+            continue
+        break
+
+    if svg_code is None:
+        raise Exception("无法生成 SVG 代码")
+    if no_icon_mode and _looks_like_raster_only_svg(svg_code):
+        print("警告: GPT 返回的 SVG 仍像整图位图，保留该结果但可编辑性会降低")
 
     # 步骤 4.5：SVG 语法验证和修复
     svg_code = check_and_fix_svg(
@@ -3271,6 +3330,7 @@ Please carefully compare and optimize:
 3. Arrows, connectors, borders, and strokes
 4. Shapes, grouping, and visual hierarchy
 5. Preserve or improve semantic top-level <g> groups for PSD export. Each major visual module should remain grouped with id and data-layer-name.
+6. Preserve element-level editability: keep text as real <text>, keep shapes/arrows as vector elements, and do not replace the drawing with a full-canvas raster <image>.
 
 **CURRENT SVG CODE:**
 ```xml
@@ -3284,6 +3344,7 @@ Please carefully compare and optimize:
 - No valid icon placeholders exist for this figure
 - Do NOT add gray rectangles, AF labels, placeholder groups, or synthetic icon boxes
 - Preserve meaningful top-level SVG groups for layered PSD export
+- Preserve editable SVG structure: Do not embed the original raster image; do not collapse elements into one bitmap
 - Focus on position and style corrections"""
         else:
             prompt = f"""You are an expert SVG optimizer. Compare the current SVG rendering with the original figure and optimize the SVG code to better match the original.

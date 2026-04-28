@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>智能画布</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=zh-20260429-psd-mode" />
+    <link rel="stylesheet" href="/styles.css?v=zh-20260429-semantic-svg" />
   </head>
   <body data-page="input">
     <div class="page">
@@ -29,7 +29,7 @@
               <button id="svgModeBtn" class="mode-tab active" type="button">可编辑 SVG</button>
               <button id="psdModeBtn" class="mode-tab" type="button">PSD 分层</button>
             </div>
-            <div class="hint">PSD 分层模式会跳过 SAM/Roboflow/SVG，只输出 Photoshop 可打开的分层 PSD 和图层包。</div>
+            <div class="hint">可编辑 SVG 使用 GPT 语义重构，不走 SAM/Roboflow；PSD 分层只输出 Photoshop 分层 PSD 和图层包。</div>
           </div>
 
           <div id="methodTextGroup">
@@ -261,6 +261,6 @@
       </main>
     </div>
 
-    <script src="/app.js?v=zh-20260429-psd-mode"></script>
+    <script src="/app.js?v=zh-20260429-semantic-svg"></script>
   </body>
 </html>
