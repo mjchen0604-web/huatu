@@ -22,15 +22,17 @@ SKIP_LAYER_TAGS = {"defs", "style", "metadata", "title", "desc", "script"}
 class RenderedLayer:
     name: str
     image: Image.Image
+    visible: bool = True
 
 
 def export_layered_psd_from_svg(
     svg_path: str | Path,
     psd_path: str | Path | None = None,
     layers_zip_path: str | Path | None = None,
+    source_image_path: str | Path | None = None,
     max_layers: int = 120,
 ) -> dict[str, str | int]:
-    """Render SVG groups into full-canvas transparent PSD layers."""
+    """Render SVG groups into PSD layers and optionally add the original image as a 1:1 base layer."""
     svg_path = Path(svg_path)
     if psd_path is None:
         psd_path = svg_path.with_name("final.psd")
@@ -54,11 +56,15 @@ def export_layered_psd_from_svg(
         layer_svg = _build_single_layer_svg(root, node)
         png_bytes = _render_svg_png(layer_svg, width, height)
         image = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
-        rendered_layers.append(RenderedLayer(name=name, image=image))
+        rendered_layers.append(RenderedLayer(name=f"GPT {name}", image=image, visible=False))
         image.save(layers_dir / f"{index:02d}_{_filename_safe(name)}.png")
 
-    merged = _merged_preview(rendered_layers, width, height)
-    _write_psd(psd_path, width, height, rendered_layers, merged)
+    original_layer = _load_original_layer(source_image_path, width, height)
+    if original_layer is not None:
+        merged = original_layer.image.convert("RGB")
+    else:
+        merged = _merged_preview(rendered_layers, width, height)
+    _write_psd(psd_path, width, height, rendered_layers, merged, original_layer=original_layer)
 
     with zipfile.ZipFile(layers_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for layer_png in sorted(layers_dir.glob("*.png")):
@@ -68,6 +74,7 @@ def export_layered_psd_from_svg(
         "psd_path": str(psd_path),
         "layers_zip_path": str(layers_zip_path),
         "layer_count": len(rendered_layers),
+        "source_layer": 1 if original_layer is not None else 0,
         "width": width,
         "height": height,
     }
@@ -178,6 +185,18 @@ def _merged_preview(layers: Iterable[RenderedLayer], width: int, height: int) ->
     return canvas.convert("RGB")
 
 
+def _load_original_layer(source_image_path: str | Path | None, width: int, height: int) -> RenderedLayer | None:
+    if not source_image_path:
+        return None
+    path = Path(source_image_path)
+    if not path.is_file():
+        return None
+    image = Image.open(path).convert("RGBA")
+    if image.size != (width, height):
+        image = image.resize((width, height), Image.Resampling.LANCZOS)
+    return RenderedLayer("Original 1:1 Base Image", image, visible=True)
+
+
 def _pascal_string(value: str) -> bytes:
     encoded = value.encode("macroman", errors="replace")[:255]
     payload = bytes([len(encoded)]) + encoded
@@ -196,11 +215,21 @@ def _channel_data(image: Image.Image) -> list[tuple[int, bytes]]:
     ]
 
 
-def _write_psd(path: Path, width: int, height: int, layers: list[RenderedLayer], merged: Image.Image) -> None:
+def _write_psd(
+    path: Path,
+    width: int,
+    height: int,
+    layers: list[RenderedLayer],
+    merged: Image.Image,
+    original_layer: RenderedLayer | None = None,
+) -> None:
     layer_records = bytearray()
     layer_channel_data = bytearray()
-    psd_layers = list(layers) + [
-        RenderedLayer("White Background", Image.new("RGBA", (width, height), "white"))
+    psd_layers = list(layers)
+    if original_layer is not None:
+        psd_layers.append(original_layer)
+    psd_layers += [
+        RenderedLayer("White Background", Image.new("RGBA", (width, height), "white"), visible=True)
     ]
 
     for layer in psd_layers:
@@ -210,7 +239,8 @@ def _write_psd(path: Path, width: int, height: int, layers: list[RenderedLayer],
             layer_records += struct.pack(">hI", channel_id, len(data) + 2)
         layer_records += b"8BIM"
         layer_records += b"norm"
-        layer_records += struct.pack(">BBBB", 255, 0, 0, 0)
+        flags = 0 if layer.visible else 2
+        layer_records += struct.pack(">BBBB", 255, 0, flags, 0)
         extra = struct.pack(">I", 0) + struct.pack(">I", 0) + _pascal_string(layer.name)
         layer_records += struct.pack(">I", len(extra))
         layer_records += extra

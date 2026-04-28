@@ -492,8 +492,10 @@ def _ensure_psd_artifacts(output_dir: Path, job: Optional["Job"] = None) -> None
             final_svg,
             psd_path=final_psd,
             layers_zip_path=layers_zip,
+            source_image_path=output_dir / "figure.png",
         )
-        message = f"分层 PSD 已生成: {result['layer_count']} 层 -> {final_psd}"
+        source_note = "，含原图1:1底图" if result.get("source_layer") else ""
+        message = f"分层 PSD 已生成: {result['layer_count']} 个 GPT 图层{source_note} -> {final_psd}"
         if job is not None:
             job.write_log("system", message)
             job.push("log", {"stream": "system", "line": message})
