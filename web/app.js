@@ -1452,6 +1452,8 @@
         return "分层 PSD";
       case "layers_zip":
         return "图层包";
+      case "psd_layer":
+        return "PSD 图层";
       case "log":
         return "日志";
       default:

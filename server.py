@@ -436,6 +436,8 @@ def _classify_artifact(rel_path: str) -> str:
         return "icon_nobg"
     if rel_path.startswith("icons/") and rel_path.endswith(".png"):
         return "icon_raw"
+    if rel_path.startswith("layers/") and rel_path.endswith(".png"):
+        return "psd_layer"
     if rel_path == "template.svg":
         return "template_svg"
     if rel_path == "optimized_template.svg":
@@ -465,6 +467,9 @@ def _collect_artifacts(output_dir: Path) -> list[dict[str, str]]:
     icons_dir = output_dir / "icons"
     if icons_dir.is_dir():
         candidates.extend(sorted(icons_dir.glob("icon_*.png")))
+    layers_dir = output_dir / "layers"
+    if layers_dir.is_dir():
+        candidates.extend(sorted(layers_dir.glob("*.png")))
 
     artifacts: list[dict[str, str]] = []
     for path in candidates:
@@ -828,7 +833,7 @@ def export_job_psd(job_id: str) -> JSONResponse:
     artifacts = [
         artifact
         for artifact in _collect_artifacts(output_dir)
-        if artifact["kind"] in {"final_psd", "layers_zip"}
+        if artifact["kind"] in {"final_psd", "layers_zip", "psd_layer"}
     ]
     return JSONResponse({"job_id": job_id, "artifacts": artifacts})
 
@@ -1365,7 +1370,7 @@ def _monitor_job(job: Job) -> None:
     if job.process.returncode == 0:
         _ensure_psd_artifacts(job.output_dir, job)
     for artifact in _collect_artifacts(job.output_dir):
-        if artifact["kind"] in {"optimized_template_svg", "final_svg", "final_psd", "layers_zip"}:
+        if artifact["kind"] in {"optimized_template_svg", "final_svg", "final_psd", "layers_zip", "psd_layer"}:
             job.push("artifact", artifact)
     job.push("status", {"state": "finished", "code": job.process.returncode})
     job.push(
