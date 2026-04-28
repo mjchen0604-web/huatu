@@ -3424,6 +3424,7 @@ def method_to_svg(
     source_figure_path: Optional[str] = None,
     reuse_intermediates: bool = False,
     gpt_only: bool = False,
+    psd_only: bool = False,
 ) -> dict:
     """
     完整流程：Paper Method → SVG with Icons
@@ -3455,11 +3456,12 @@ def method_to_svg(
         source_figure_path: 外部输入图片路径（提供后会跳过步骤一的文生图）
         reuse_intermediates: 继续任务时复用已有 samed/boxlib/icons，避免重复 SAM/RMBG
         gpt_only: 跳过 SAM/RMBG，只用 GPT 根据整图重构 SVG
+        psd_only: 只生成/导入图片，后端再按原图尺寸拆分透明图层 PSD，不生成 SVG
 
     Returns:
         结果字典
     """
-    if not api_key:
+    if not api_key and not (psd_only and source_figure_path):
         raise ValueError("必须提供 api_key")
     if not method_text and not source_figure_path:
         raise ValueError("必须提供 method_text 或 source_figure_path")
@@ -3508,6 +3510,8 @@ def method_to_svg(
         print("断点续跑: 启用中间产物复用")
     if gpt_only:
         print("GPT-only 模式: 跳过 SAM/RMBG，直接重构 SVG 并导出分层 PSD")
+    if psd_only:
+        print("PSD 分层模式: 只生成/导入原图，跳过 SAM/RMBG/SVG，由后端导出分层 PSD")
     print("=" * 60)
 
     # 步骤一：生成图片
@@ -3532,6 +3536,21 @@ def method_to_svg(
             provider=provider,
             image_size=image_size,
         )
+
+    if psd_only:
+        print("\n" + "=" * 60)
+        print("PSD 分层模式：已准备源图，跳过后续 SVG 流程")
+        print(f"源图: {figure_path}")
+        print("=" * 60)
+        return {
+            "figure_path": str(figure_path),
+            "samed_path": None,
+            "boxlib_path": None,
+            "icon_infos": [],
+            "template_svg_path": None,
+            "optimized_template_path": None,
+            "final_svg_path": None,
+        }
 
     if stop_after == 1:
         print("\n" + "=" * 60)
@@ -4072,6 +4091,11 @@ if __name__ == "__main__":
         action="store_true",
         help="跳过 SAM/RMBG，只用 GPT 根据整张原图生成/重构 SVG",
     )
+    parser.add_argument(
+        "--psd_only",
+        action="store_true",
+        help="PSD 分层模式：只生成/导入源图，跳过 SAM/RMBG/SVG，由服务端导出分层 PSD",
+    )
 
     # 步骤 4.6 优化迭代次数参数
     parser.add_argument(
@@ -4146,4 +4170,5 @@ if __name__ == "__main__":
         source_figure_path=args.source_figure_path,
         reuse_intermediates=args.reuse_intermediates,
         gpt_only=args.gpt_only,
+        psd_only=args.psd_only,
     )

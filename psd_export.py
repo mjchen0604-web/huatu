@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable
 from xml.etree import ElementTree as ET
 
+import numpy as np
 from PIL import Image
 
 
@@ -78,6 +79,194 @@ def export_layered_psd_from_svg(
         "width": width,
         "height": height,
     }
+
+
+def export_layered_psd_from_image(
+    image_path: str | Path,
+    psd_path: str | Path | None = None,
+    layers_zip_path: str | Path | None = None,
+    *,
+    max_layers: int = 32,
+    white_threshold: int = 245,
+    min_area: int = 48,
+    dilation_iterations: int = 3,
+) -> dict[str, str | int]:
+    """Split a raster figure into full-canvas transparent PNG layers and write a PSD.
+
+    This mode is intentionally independent from SVG/SAM. It keeps every exported
+    layer at the original canvas size, removes only the connected white
+    background, adds a white PSD base layer, and packages the transparent layer
+    PNGs into layers.zip for manual Photoshop workflows.
+    """
+    image_path = Path(image_path)
+    if psd_path is None:
+        psd_path = image_path.with_name("final.psd")
+    if layers_zip_path is None:
+        layers_zip_path = image_path.with_name("layers.zip")
+    psd_path = Path(psd_path)
+    layers_zip_path = Path(layers_zip_path)
+
+    source = Image.open(image_path).convert("RGBA")
+    width, height = source.size
+    arr = np.array(source)
+    alpha_mask = arr[..., 3] > 8
+    rgb = arr[..., :3].astype(np.int16)
+    near_white = (
+        (rgb[..., 0] >= white_threshold)
+        & (rgb[..., 1] >= white_threshold)
+        & (rgb[..., 2] >= white_threshold)
+    )
+    rgb_max = rgb.max(axis=2)
+    rgb_min = rgb.min(axis=2)
+    saturation = rgb_max - rgb_min
+    neutral_light = (rgb_min >= 180) & (saturation <= 35)
+    background_mask = (near_white | neutral_light) & alpha_mask
+    foreground_mask = alpha_mask & ~background_mask
+
+    layers_dir = image_path.parent / "layers"
+    layers_dir.mkdir(parents=True, exist_ok=True)
+    for old_png in layers_dir.glob("*.png"):
+        old_png.unlink()
+
+    grouped_mask = _dilate_mask(foreground_mask, iterations=dilation_iterations)
+    components = _connected_components(grouped_mask, min_area=min_area)
+    components.sort(key=lambda item: item["area"], reverse=True)
+
+    rendered_layers: list[RenderedLayer] = []
+    used_mask = np.zeros((height, width), dtype=bool)
+    selected_components = components[:max_layers]
+    for index, component in enumerate(selected_components, start=1):
+        component_mask = np.zeros((height, width), dtype=bool)
+        ys = component["ys"]
+        xs = component["xs"]
+        component_mask[ys, xs] = True
+        layer_mask = foreground_mask & component_mask
+        if int(layer_mask.sum()) < min_area:
+            continue
+        used_mask |= layer_mask
+        name = f"Raster Layer {index:02d}"
+        layer_image = _mask_to_layer_image(arr, layer_mask)
+        rendered_layers.append(RenderedLayer(name, layer_image, visible=True))
+        layer_image.save(layers_dir / f"{index:02d}_{_filename_safe(name)}.png")
+
+    misc_mask = foreground_mask & ~used_mask
+    if int(misc_mask.sum()) >= min_area:
+        name = "Raster Layer Misc"
+        layer_image = _mask_to_layer_image(arr, misc_mask)
+        rendered_layers.append(RenderedLayer(name, layer_image, visible=True))
+        layer_image.save(layers_dir / f"{len(rendered_layers):02d}_{_filename_safe(name)}.png")
+
+    if not rendered_layers:
+        layer_image = source.copy()
+        rendered_layers.append(RenderedLayer("Raster Layer 01", layer_image, visible=True))
+        layer_image.save(layers_dir / "01_Raster_Layer_01.png")
+
+    _write_psd(psd_path, width, height, rendered_layers, source.convert("RGB"))
+
+    with zipfile.ZipFile(layers_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for layer_png in sorted(layers_dir.glob("*.png")):
+            archive.write(layer_png, arcname=f"layers/{layer_png.name}")
+
+    return {
+        "psd_path": str(psd_path),
+        "layers_zip_path": str(layers_zip_path),
+        "layer_count": len(rendered_layers),
+        "source_layer": 0,
+        "width": width,
+        "height": height,
+    }
+
+
+def _edge_connected_mask(candidate: np.ndarray) -> np.ndarray:
+    """Return candidate pixels connected to the image border using 4-neighbours."""
+    height, width = candidate.shape
+    visited = np.zeros_like(candidate, dtype=bool)
+    stack: list[tuple[int, int]] = []
+
+    def push(y: int, x: int) -> None:
+        if candidate[y, x] and not visited[y, x]:
+            visited[y, x] = True
+            stack.append((y, x))
+
+    for x in range(width):
+        push(0, x)
+        push(height - 1, x)
+    for y in range(height):
+        push(y, 0)
+        push(y, width - 1)
+
+    while stack:
+        y, x = stack.pop()
+        if y > 0:
+            push(y - 1, x)
+        if y + 1 < height:
+            push(y + 1, x)
+        if x > 0:
+            push(y, x - 1)
+        if x + 1 < width:
+            push(y, x + 1)
+    return visited
+
+
+def _dilate_mask(mask: np.ndarray, iterations: int = 3) -> np.ndarray:
+    out = mask.astype(bool, copy=True)
+    height, width = out.shape
+    for _ in range(max(0, iterations)):
+        padded = np.pad(out, 1, mode="constant", constant_values=False)
+        grown = np.zeros_like(out, dtype=bool)
+        for dy in range(3):
+            for dx in range(3):
+                grown |= padded[dy : dy + height, dx : dx + width]
+        out = grown
+    return out
+
+
+def _connected_components(mask: np.ndarray, min_area: int = 48) -> list[dict[str, np.ndarray | int]]:
+    height, width = mask.shape
+    visited = np.zeros_like(mask, dtype=bool)
+    components: list[dict[str, np.ndarray | int]] = []
+    ys_all, xs_all = np.nonzero(mask)
+    for start_y, start_x in zip(ys_all.tolist(), xs_all.tolist()):
+        if visited[start_y, start_x]:
+            continue
+        visited[start_y, start_x] = True
+        stack = [(start_y, start_x)]
+        ys: list[int] = []
+        xs: list[int] = []
+        while stack:
+            y, x = stack.pop()
+            ys.append(y)
+            xs.append(x)
+            if y > 0 and mask[y - 1, x] and not visited[y - 1, x]:
+                visited[y - 1, x] = True
+                stack.append((y - 1, x))
+            if y + 1 < height and mask[y + 1, x] and not visited[y + 1, x]:
+                visited[y + 1, x] = True
+                stack.append((y + 1, x))
+            if x > 0 and mask[y, x - 1] and not visited[y, x - 1]:
+                visited[y, x - 1] = True
+                stack.append((y, x - 1))
+            if x + 1 < width and mask[y, x + 1] and not visited[y, x + 1]:
+                visited[y, x + 1] = True
+                stack.append((y, x + 1))
+
+        area = len(ys)
+        if area >= min_area:
+            components.append(
+                {
+                    "ys": np.array(ys, dtype=np.int32),
+                    "xs": np.array(xs, dtype=np.int32),
+                    "area": area,
+                }
+            )
+    return components
+
+
+def _mask_to_layer_image(source_rgba: np.ndarray, mask: np.ndarray) -> Image.Image:
+    layer_arr = np.zeros_like(source_rgba)
+    layer_arr[..., :3] = source_rgba[..., :3]
+    layer_arr[..., 3] = np.where(mask, source_rgba[..., 3], 0).astype(np.uint8)
+    return Image.fromarray(layer_arr, mode="RGBA")
 
 
 def _local_name(tag: str) -> str:

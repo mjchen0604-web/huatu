@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>智能画布</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=zh-20260428-config-persist" />
+    <link rel="stylesheet" href="/styles.css?v=zh-20260429-psd-mode" />
   </head>
   <body data-page="input">
     <div class="page">
@@ -21,6 +21,15 @@
           <div class="mode-tabs" role="group" aria-label="输入模式">
             <button id="textModeBtn" class="mode-tab active" type="button">文本生成</button>
             <button id="imageModeBtn" class="mode-tab" type="button">图片转画布</button>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label">输出模式</label>
+            <div class="mode-tabs output-mode-tabs" role="group" aria-label="输出模式">
+              <button id="svgModeBtn" class="mode-tab active" type="button">可编辑 SVG</button>
+              <button id="psdModeBtn" class="mode-tab" type="button">PSD 分层</button>
+            </div>
+            <div class="hint">PSD 分层模式会跳过 SAM/Roboflow/SVG，只输出 Photoshop 可打开的分层 PSD 和图层包。</div>
           </div>
 
           <div id="methodTextGroup">
@@ -252,6 +261,6 @@
       </main>
     </div>
 
-    <script src="/app.js?v=zh-20260428-config-persist"></script>
+    <script src="/app.js?v=zh-20260429-psd-mode"></script>
   </body>
 </html>

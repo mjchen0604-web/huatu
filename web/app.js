@@ -84,6 +84,8 @@
     const sourceImageGroup = $("sourceImageGroup");
     const textModeBtn = $("textModeBtn");
     const imageModeBtn = $("imageModeBtn");
+    const svgModeBtn = $("svgModeBtn");
+    const psdModeBtn = $("psdModeBtn");
     const historyList = $("historyList");
     const archiveList = $("archiveList");
     const archiveToggle = $("archiveToggle");
@@ -105,6 +107,7 @@
     const adminStatus = $("adminStatus");
     let defaults = { ...DEFAULT_INPUT_CONFIG };
     let inputMode = "text";
+    let outputMode = "svg";
     let uploadedReferencePath = null;
     let uploadedSourcePath = null;
     let showArchive = false;
@@ -166,6 +169,7 @@
         methodText: "",
         ...defaults,
         inputMode: "text",
+        outputMode: "svg",
         referencePath: null,
         referenceUrl: "",
         referenceStatus: "",
@@ -312,6 +316,7 @@
           ? $("reasoningEffort")?.value ?? defaults.reasoningEffort
           : defaults.reasoningEffort,
         inputMode,
+        outputMode,
         optimizeIterations: $("optimizeIterations")?.value ?? "0",
         imageSize: adminUnlocked ? imageSizeInput?.value ?? "4K" : defaults.imageSize,
         samBackend: adminUnlocked ? samBackend?.value ?? "roboflow" : defaults.samBackend,
@@ -429,6 +434,9 @@
       if (state.inputMode === "image" || state.inputMode === "text") {
         setInputMode(state.inputMode, false);
       }
+      if (state.outputMode === "psd" || state.outputMode === "svg") {
+        setOutputMode(state.outputMode, false);
+      }
       if (typeof state.optimizeIterations === "string" && $("optimizeIterations")) {
         $("optimizeIterations").value = state.optimizeIterations;
       }
@@ -511,6 +519,15 @@
       }
     }
 
+    function setOutputMode(mode, persist = true) {
+      outputMode = mode === "psd" ? "psd" : "svg";
+      svgModeBtn?.classList.toggle("active", outputMode === "svg");
+      psdModeBtn?.classList.toggle("active", outputMode === "psd");
+      if (persist) {
+        saveInputState();
+      }
+    }
+
     function syncImageSizeVisibility() {
       syncProviderFieldVisibility();
     }
@@ -550,6 +567,8 @@
 
     textModeBtn?.addEventListener("click", () => setInputMode("text"));
     imageModeBtn?.addEventListener("click", () => setInputMode("image"));
+    svgModeBtn?.addEventListener("click", () => setOutputMode("svg"));
+    psdModeBtn?.addEventListener("click", () => setOutputMode("psd"));
     archiveToggle?.addEventListener("click", () => {
       showArchive = !showArchive;
       if (archiveList) {
@@ -735,6 +754,7 @@
 
       const payload = {
         input_mode: inputMode,
+        psd_only: outputMode === "psd",
         method_text: inputMode === "text" ? methodText : "",
         provider: $("provider").value || null,
         api_key: $("apiKey").value.trim() || null,
@@ -1140,7 +1160,7 @@
       2: ["samed"],
       3: ["icon_nobg", "icon_raw"],
       4: ["optimized_template_svg", "template_svg"],
-      5: ["final_svg", "optimized_template_svg", "template_svg"],
+      5: ["final_svg", "final_psd", "optimized_template_svg", "template_svg", "figure"],
     };
 
     const artifacts = new Set();
@@ -1160,6 +1180,13 @@
         data.kind === "final_svg"
       ) {
         await loadSvgAsset(data.url);
+      } else if (data.kind === "figure" && currentStep === 0) {
+        showRasterPreview(data.url, "源图预览");
+      } else if (data.kind === "final_psd") {
+        const figure = [...artifactData].reverse().find((item) => item.kind === "figure");
+        if (figure) {
+          showRasterPreview(figure.url, "PSD 分层已生成（预览源图）");
+        }
       }
 
       if (stepMap[data.kind] && stepMap[data.kind].step > currentStep) {
@@ -1265,6 +1292,21 @@
       }
     }
 
+    function showRasterPreview(url, title = "图片预览") {
+      iframe.style.display = "none";
+      fallback.classList.add("active");
+      if (fallbackTitle) {
+        fallbackTitle.textContent = title;
+      }
+      if (fallbackObject) {
+        fallbackObject.removeAttribute("data");
+      }
+      if (fallbackImage) {
+        fallbackImage.src = url;
+        fallbackImage.classList.add("visible");
+      }
+    }
+
     async function loadSvgAsset(url) {
       const loadToken = ++svgLoadToken;
       if (fallbackObject) {
@@ -1325,19 +1367,11 @@
       }
       if (artifact.url.endsWith(".svg")) {
         loadSvgAsset(artifact.url);
+      } else if (artifact.kind === "final_psd") {
+        const figure = [...artifactData].reverse().find((item) => item.kind === "figure");
+        showRasterPreview(figure?.url || artifact.url, "PSD 分层已生成（预览源图）");
       } else {
-        iframe.style.display = "none";
-        fallback.classList.add("active");
-        if (fallbackTitle) {
-          fallbackTitle.textContent = `步骤 ${step} 预览`;
-        }
-        if (fallbackObject) {
-          fallbackObject.removeAttribute("data");
-        }
-        if (fallbackImage) {
-          fallbackImage.src = artifact.url;
-          fallbackImage.classList.add("visible");
-        }
+        showRasterPreview(artifact.url, `步骤 ${step} 预览`);
       }
       const meta = stepMap[artifact.kind];
       statusText.textContent = `步骤 ${step}/5 · ${meta ? meta.label : artifact.name}`;

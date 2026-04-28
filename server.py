@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from psd_export import export_layered_psd_from_svg
+from psd_export import export_layered_psd_from_image, export_layered_psd_from_svg
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -304,6 +304,9 @@ def _build_continue_cmd(output_dir: Path) -> list[str]:
     gpt_only = saved_request.get("gpt_only")
     if gpt_only is True or str(gpt_only).lower() == "true":
         cmd += ["--gpt_only"]
+    psd_only = saved_request.get("psd_only")
+    if psd_only is True or str(psd_only).lower() == "true":
+        cmd += ["--psd_only"]
     sam_backend = _request_value(
         saved_request,
         output_dir,
@@ -481,21 +484,33 @@ def _collect_artifacts(output_dir: Path) -> list[dict[str, str]]:
 
 def _ensure_psd_artifacts(output_dir: Path, job: Optional["Job"] = None) -> None:
     final_svg = output_dir / "final.svg"
-    if not final_svg.is_file():
+    figure_path = output_dir / "figure.png"
+    if not final_svg.is_file() and not figure_path.is_file():
         return
     final_psd = output_dir / "final.psd"
     layers_zip = output_dir / "layers.zip"
     if final_psd.is_file() and layers_zip.is_file():
         return
     try:
-        result = export_layered_psd_from_svg(
-            final_svg,
-            psd_path=final_psd,
-            layers_zip_path=layers_zip,
-            source_image_path=output_dir / "figure.png",
-        )
-        source_note = "，含原图1:1底图" if result.get("source_layer") else ""
-        message = f"分层 PSD 已生成: {result['layer_count']} 个 GPT 图层{source_note} -> {final_psd}"
+        meta = _read_job_meta(output_dir)
+        saved_request = meta.get("request") if isinstance(meta.get("request"), dict) else {}
+        psd_only = saved_request.get("psd_only") is True or str(saved_request.get("psd_only")).lower() == "true"
+        if psd_only or not final_svg.is_file():
+            result = export_layered_psd_from_image(
+                figure_path,
+                psd_path=final_psd,
+                layers_zip_path=layers_zip,
+            )
+            message = f"PSD 分层模式已生成: {result['layer_count']} 个透明图层 -> {final_psd}"
+        else:
+            result = export_layered_psd_from_svg(
+                final_svg,
+                psd_path=final_psd,
+                layers_zip_path=layers_zip,
+                source_image_path=figure_path,
+            )
+            source_note = "，含原图1:1底图" if result.get("source_layer") else ""
+            message = f"分层 PSD 已生成: {result['layer_count']} 个 GPT 图层{source_note} -> {final_psd}"
         if job is not None:
             job.write_log("system", message)
             job.push("log", {"stream": "system", "line": message})
@@ -509,7 +524,7 @@ def _ensure_psd_artifacts(output_dir: Path, job: Optional["Job"] = None) -> None
 
 
 def _infer_job_state(output_dir: Path, meta: dict[str, Any]) -> tuple[str, Optional[int]]:
-    if (output_dir / "final.svg").is_file():
+    if (output_dir / "final.svg").is_file() or (output_dir / "final.psd").is_file():
         return "done", 0
     code = meta.get("return_code")
     if isinstance(code, int):
@@ -585,6 +600,7 @@ class RunRequest(BaseModel):
     bria_api_key: Optional[str] = None
     placeholder_mode: Optional[str] = None
     gpt_only: Optional[bool] = True
+    psd_only: Optional[bool] = False
     merge_threshold: Optional[float] = None
     optimize_iterations: Optional[int] = None
     reference_image_path: Optional[str] = None
@@ -806,8 +822,8 @@ def archive_job(job_id: str, req: ArchiveRequest) -> JSONResponse:
 @app.post("/api/jobs/{job_id}/export-psd")
 def export_job_psd(job_id: str) -> JSONResponse:
     output_dir = _resolve_job_output_dir(job_id)
-    if not (output_dir / "final.svg").is_file():
-        raise HTTPException(status_code=400, detail="Cannot export PSD: missing final.svg")
+    if not (output_dir / "final.svg").is_file() and not (output_dir / "figure.png").is_file():
+        raise HTTPException(status_code=400, detail="Cannot export PSD: missing final.svg or figure.png")
     _ensure_psd_artifacts(output_dir)
     artifacts = [
         artifact
@@ -1052,6 +1068,8 @@ def run_job(req: RunRequest) -> JSONResponse:
     cmd += ["--placeholder_mode", placeholder_mode]
     if req.gpt_only is not False:
         cmd += ["--gpt_only"]
+    if req.psd_only:
+        cmd += ["--psd_only"]
     cmd += ["--merge_threshold", str(merge_threshold)]
     sam_backend = req.sam_backend or app_config.get("samBackend") or DEFAULT_SAM_BACKEND
     if sam_backend:
