@@ -307,6 +307,9 @@ def _build_continue_cmd(output_dir: Path) -> list[str]:
     psd_only = saved_request.get("psd_only")
     if psd_only is True or str(psd_only).lower() == "true":
         cmd += ["--psd_only"]
+    vectorize_layers = saved_request.get("vectorize_layers")
+    if vectorize_layers is True or str(vectorize_layers).lower() == "true":
+        cmd += ["--vectorize_layers"]
     sam_backend = _request_value(
         saved_request,
         output_dir,
@@ -438,6 +441,8 @@ def _classify_artifact(rel_path: str) -> str:
         return "icon_raw"
     if rel_path.startswith("layers/") and rel_path.endswith(".png"):
         return "psd_layer"
+    if rel_path.startswith("vector_layers/") and rel_path.endswith(".svg"):
+        return "vector_layer_svg"
     if rel_path == "template.svg":
         return "template_svg"
     if rel_path == "optimized_template.svg":
@@ -448,6 +453,8 @@ def _classify_artifact(rel_path: str) -> str:
         return "final_psd"
     if rel_path == "layers.zip":
         return "layers_zip"
+    if rel_path == "raster_layers.zip":
+        return "raster_layers_zip"
     if rel_path == "run.log":
         return "log"
     return "artifact"
@@ -470,6 +477,11 @@ def _collect_artifacts(output_dir: Path) -> list[dict[str, str]]:
     layers_dir = output_dir / "layers"
     if layers_dir.is_dir():
         candidates.extend(sorted(layers_dir.glob("*.png")))
+    vector_layers_dir = output_dir / "vector_layers"
+    if vector_layers_dir.is_dir():
+        candidates.extend(sorted(vector_layers_dir.glob("*.svg")))
+    if (output_dir / "raster_layers.zip").is_file():
+        candidates.append(output_dir / "raster_layers.zip")
 
     artifacts: list[dict[str, str]] = []
     for path in candidates:
@@ -606,6 +618,7 @@ class RunRequest(BaseModel):
     placeholder_mode: Optional[str] = None
     gpt_only: Optional[bool] = True
     psd_only: Optional[bool] = False
+    vectorize_layers: Optional[bool] = False
     merge_threshold: Optional[float] = None
     optimize_iterations: Optional[int] = None
     reference_image_path: Optional[str] = None
@@ -1075,6 +1088,8 @@ def run_job(req: RunRequest) -> JSONResponse:
         cmd += ["--gpt_only"]
     if req.psd_only:
         cmd += ["--psd_only"]
+    if req.vectorize_layers:
+        cmd += ["--vectorize_layers"]
     cmd += ["--merge_threshold", str(merge_threshold)]
     sam_backend = req.sam_backend or app_config.get("samBackend") or DEFAULT_SAM_BACKEND
     if sam_backend:
@@ -1370,7 +1385,15 @@ def _monitor_job(job: Job) -> None:
     if job.process.returncode == 0:
         _ensure_psd_artifacts(job.output_dir, job)
     for artifact in _collect_artifacts(job.output_dir):
-        if artifact["kind"] in {"optimized_template_svg", "final_svg", "final_psd", "layers_zip", "psd_layer"}:
+        if artifact["kind"] in {
+            "optimized_template_svg",
+            "final_svg",
+            "final_psd",
+            "layers_zip",
+            "raster_layers_zip",
+            "psd_layer",
+            "vector_layer_svg",
+        }:
             job.push("artifact", artifact)
     job.push("status", {"state": "finished", "code": job.process.returncode})
     job.push(

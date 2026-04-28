@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import html
 import io
 import json
 import os
@@ -85,6 +86,8 @@ import torch
 from PIL import Image, ImageDraw, ImageFont
 from torchvision import transforms
 from transformers import AutoModelForImageSegmentation
+
+from psd_export import export_layered_psd_from_image
 
 
 # ============================================================================
@@ -2572,6 +2575,264 @@ def _looks_like_raster_only_svg(svg_code: str) -> bool:
     return image_count > 0 and editable_count <= 3
 
 
+def _layer_alpha_bbox(image: Image.Image, padding: int = 4) -> Optional[tuple[int, int, int, int]]:
+    """Return a padded bbox for visible pixels in a transparent full-canvas layer."""
+    rgba = image.convert("RGBA")
+    alpha = rgba.getchannel("A")
+    bbox = alpha.getbbox()
+    if bbox is None:
+        return None
+    left, top, right, bottom = bbox
+    width, height = rgba.size
+    return (
+        max(0, left - padding),
+        max(0, top - padding),
+        min(width, right + padding),
+        min(height, bottom + padding),
+    )
+
+
+def _filename_safe_fragment(value: str, fallback: str = "layer") -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("._")
+    return cleaned[:80] or fallback
+
+
+def _extract_svg_inner(svg_code: str) -> str:
+    """Extract the children from an SVG document for embedding in a positioned group."""
+    svg_code = re.sub(r"<\\?xml[^>]*>", "", svg_code, flags=re.IGNORECASE).strip()
+    svg_code = re.sub(r"<!DOCTYPE[^>]*>", "", svg_code, flags=re.IGNORECASE).strip()
+    match = re.search(r"<svg\\b[^>]*>([\\s\\S]*?)</svg>", svg_code, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else svg_code
+
+
+def _prefix_svg_ids(svg_inner: str, prefix: str) -> str:
+    """Avoid id/marker collisions when many GPT-generated SVG fragments are merged."""
+    id_values = []
+    for match in re.finditer(r"\\bid=(['\"])([^'\"]+)\\1", svg_inner):
+        raw = match.group(2)
+        if raw not in id_values:
+            id_values.append(raw)
+
+    out = svg_inner
+    for raw_id in id_values:
+        safe_id = _filename_safe_fragment(raw_id, "id")
+        new_id = f"{prefix}_{safe_id}"
+        out = re.sub(
+            rf"\\bid=(['\"]){re.escape(raw_id)}\\1",
+            f'id="{new_id}"',
+            out,
+        )
+        out = re.sub(
+            rf"url\\(\\s*#{re.escape(raw_id)}\\s*\\)",
+            f"url(#{new_id})",
+            out,
+        )
+        out = re.sub(
+            rf"\\b(href|xlink:href)=(['\"])#{re.escape(raw_id)}\\2",
+            lambda m: f'{m.group(1)}="#{new_id}"',
+            out,
+        )
+    return out
+
+
+def _vector_layer_prompt(layer_name: str, width: int, height: int, retry: bool = False) -> str:
+    """Prompt used by PSD→矢量 SVG mode for a single transparent layer crop."""
+    strict_retry = ""
+    if retry:
+        strict_retry = """
+
+你的上一版不合格：它像是把 PNG 原图嵌进 SVG，而不是重构成可编辑矢量。
+请重新输出：禁止 <image>；用 <text>/<path>/<rect>/<circle>/<line>/<polyline>/<polygon> 等真实 SVG 元素重画。
+"""
+
+    return f"""把这张透明 PNG 图层裁切图重构为可编辑 SVG 片段。
+
+当前模式：PSD→矢量 SVG
+图层名：{layer_name}
+裁切画布尺寸：{width} x {height}
+
+硬性要求：
+- 输出完整 <svg>，width="{width}" height="{height}" viewBox="0 0 {width} {height}"
+- 只绘制透明 PNG 中可见的内容，不要添加白底或其他背景
+- 保留元素在裁切区域内的相对位置
+- 尽量把文字生成为真实 <text> 元素，不要烘焙成图片
+- 线条、箭头、边框、圆环、图表、图标尽量用可编辑 SVG 元素重构
+- 可以使用 <g data-layer-name="..."> 把同一小组件的子元素组织起来
+- 不要使用整张 <image> 嵌入原 PNG；最终结果应该在 Illustrator/Photoshop/SVG 编辑器中可拆开编辑
+- 如果图层里包含多个独立元素，也请在同一个 SVG 内分成多个 <g> 或基础图元
+
+只输出 SVG 代码，不要 markdown，不要解释。{strict_retry}"""
+
+
+def _vectorize_layer_png(
+    layer_image: Image.Image,
+    layer_name: str,
+    api_key: str,
+    model: str,
+    base_url: str,
+    provider: ProviderType,
+    reasoning_effort: Optional[str] = None,
+) -> str:
+    """Call GPT on one transparent layer crop and return a validated editable SVG."""
+    width, height = layer_image.size
+    layer_image = layer_image.convert("RGBA")
+
+    svg_code: Optional[str] = None
+    for attempt in range(2):
+        prompt = _vector_layer_prompt(layer_name, width, height, retry=attempt > 0)
+        content = call_llm_multimodal(
+            contents=[prompt, layer_image],
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            provider=provider,
+            max_tokens=30000,
+            temperature=0.2,
+            reasoning_effort=reasoning_effort,
+        )
+        if not content:
+            raise RuntimeError(f"图层 {layer_name} 的 GPT 矢量化响应为空")
+
+        svg_code = extract_svg_code(content)
+        if not svg_code:
+            raise RuntimeError(f"图层 {layer_name} 的 GPT 响应中没有 SVG")
+
+        svg_code = check_and_fix_svg(
+            svg_code=svg_code,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            provider=provider,
+            reasoning_effort=reasoning_effort,
+        )
+        if not _looks_like_raster_only_svg(svg_code):
+            break
+        print(f"警告: 图层 {layer_name} 返回了位图式 SVG，尝试重新矢量化")
+
+    if svg_code is None:
+        raise RuntimeError(f"图层 {layer_name} 矢量化失败")
+    return svg_code
+
+
+def vectorize_raster_layers_to_svg(
+    figure_path: str,
+    output_dir: str,
+    api_key: str,
+    model: str,
+    base_url: str,
+    provider: ProviderType,
+    reasoning_effort: Optional[str] = None,
+    max_layers: int = 80,
+) -> str:
+    """Split the source image into transparent raster layers, vectorize each layer, then merge."""
+    print("\n" + "=" * 60)
+    print("PSD→矢量 SVG：先分层，再逐层 GPT 矢量化，最后按原坐标合并")
+    print("=" * 60)
+
+    output_dir_path = Path(output_dir)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+    figure_path_obj = Path(figure_path)
+    source = Image.open(figure_path_obj).convert("RGBA")
+    canvas_width, canvas_height = source.size
+    print(f"源图尺寸: {canvas_width} x {canvas_height}")
+
+    raster_psd_path = output_dir_path / "raster_layers.psd"
+    raster_zip_path = output_dir_path / "raster_layers.zip"
+    split_result = export_layered_psd_from_image(
+        figure_path_obj,
+        psd_path=raster_psd_path,
+        layers_zip_path=raster_zip_path,
+        max_layers=max_layers,
+    )
+    print(f"本地图像算法已拆出 {split_result.get('layer_count')} 个透明图层")
+
+    layers_dir = output_dir_path / "layers"
+    vector_layers_dir = output_dir_path / "vector_layers"
+    vector_layers_dir.mkdir(parents=True, exist_ok=True)
+    for old_svg in vector_layers_dir.glob("*.svg"):
+        old_svg.unlink()
+
+    svg_fragments: list[str] = []
+    manifest: list[dict[str, Any]] = []
+    layer_paths = sorted(layers_dir.glob("*.png"))
+    if not layer_paths:
+        raise RuntimeError("PSD→矢量 SVG 模式没有找到可矢量化的 PNG 图层")
+
+    for index, layer_path in enumerate(layer_paths, start=1):
+        layer_full = Image.open(layer_path).convert("RGBA")
+        bbox = _layer_alpha_bbox(layer_full)
+        if bbox is None:
+            print(f"  跳过空图层: {layer_path.name}")
+            continue
+        left, top, right, bottom = bbox
+        crop = layer_full.crop(bbox)
+        layer_name = layer_path.stem
+        print(
+            f"  [{index}/{len(layer_paths)}] GPT 矢量化图层 {layer_name}: "
+            f"bbox=({left},{top},{right},{bottom}) size={crop.size[0]}x{crop.size[1]}"
+        )
+
+        vector_svg = _vectorize_layer_png(
+            layer_image=crop,
+            layer_name=layer_name,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            provider=provider,
+            reasoning_effort=reasoning_effort,
+        )
+        safe_name = _filename_safe_fragment(layer_name, f"layer_{index:02d}")
+        vector_path = vector_layers_dir / f"{index:02d}_{safe_name}.svg"
+        vector_path.write_text(vector_svg, encoding="utf-8")
+
+        inner = _extract_svg_inner(vector_svg)
+        group_id = f"vector_layer_{index:02d}_{safe_name}"
+        inner = _prefix_svg_ids(inner, group_id)
+        label = html.escape(layer_name, quote=True)
+        svg_fragments.append(
+            f'<g id="{group_id}" data-layer-name="{label}" '
+            f'transform="translate({left} {top})">\\n{inner}\\n</g>'
+        )
+        manifest.append(
+            {
+                "index": index,
+                "name": layer_name,
+                "bbox": [left, top, right, bottom],
+                "svg": vector_path.relative_to(output_dir_path).as_posix(),
+                "source_layer": layer_path.relative_to(output_dir_path).as_posix(),
+            }
+        )
+
+    if not svg_fragments:
+        raise RuntimeError("PSD→矢量 SVG 模式没有生成任何 SVG 图层")
+
+    manifest_path = vector_layers_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    final_svg = output_dir_path / "final.svg"
+    svg_code = "\n".join(
+        [
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_width}" height="{canvas_height}" viewBox="0 0 {canvas_width} {canvas_height}">',
+            '  <rect id="white_background" data-layer-name="White Background" x="0" y="0" width="100%" height="100%" fill="white"/>',
+            *svg_fragments,
+            "</svg>",
+        ]
+    )
+    svg_code = check_and_fix_svg(
+        svg_code=svg_code,
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        provider=provider,
+        reasoning_effort=reasoning_effort,
+    )
+    final_svg.write_text(svg_code, encoding="utf-8")
+
+    print(f"PSD→矢量 SVG 已完成: {final_svg}")
+    print(f"矢量图层目录: {vector_layers_dir}")
+    return str(final_svg)
+
+
 def generate_svg_template(
     figure_path: str,
     samed_path: str,
@@ -3486,6 +3747,7 @@ def method_to_svg(
     reuse_intermediates: bool = False,
     gpt_only: bool = False,
     psd_only: bool = False,
+    vectorize_layers: bool = False,
 ) -> dict:
     """
     完整流程：Paper Method → SVG with Icons
@@ -3518,6 +3780,7 @@ def method_to_svg(
         reuse_intermediates: 继续任务时复用已有 samed/boxlib/icons，避免重复 SAM/RMBG
         gpt_only: 跳过 SAM/RMBG，只用 GPT 根据整图重构 SVG
         psd_only: 只生成/导入图片，后端再按原图尺寸拆分透明图层 PSD，不生成 SVG
+        vectorize_layers: PSD→矢量 SVG，先本地分透明图层，再逐层调用 GPT 矢量化并合并
 
     Returns:
         结果字典
@@ -3573,6 +3836,8 @@ def method_to_svg(
         print("GPT-only 模式: 跳过 SAM/RMBG，直接重构 SVG 并导出分层 PSD")
     if psd_only:
         print("PSD 分层模式: 只生成/导入原图，跳过 SAM/RMBG/SVG，由后端导出分层 PSD")
+    if vectorize_layers:
+        print("PSD→矢量 SVG 模式: 先分层，再逐层 GPT 矢量化，跳过 SAM/Roboflow/RMBG")
     print("=" * 60)
 
     # 步骤一：生成图片
@@ -3611,6 +3876,26 @@ def method_to_svg(
             "template_svg_path": None,
             "optimized_template_path": None,
             "final_svg_path": None,
+        }
+
+    if vectorize_layers:
+        final_svg = vectorize_raster_layers_to_svg(
+            figure_path=str(figure_path),
+            output_dir=str(output_dir),
+            api_key=api_key,
+            model=svg_gen_model,
+            base_url=base_url,
+            provider=provider,
+            reasoning_effort=normalized_reasoning_effort,
+        )
+        return {
+            "figure_path": str(figure_path),
+            "samed_path": str(figure_path),
+            "boxlib_path": None,
+            "icon_infos": [],
+            "template_svg_path": None,
+            "optimized_template_path": None,
+            "final_svg_path": final_svg,
         }
 
     if stop_after == 1:
@@ -4157,6 +4442,11 @@ if __name__ == "__main__":
         action="store_true",
         help="PSD 分层模式：只生成/导入源图，跳过 SAM/RMBG/SVG，由服务端导出分层 PSD",
     )
+    parser.add_argument(
+        "--vectorize_layers",
+        action="store_true",
+        help="PSD→矢量 SVG：先本地拆分透明图层，再逐层调用 GPT 矢量化并合并 SVG",
+    )
 
     # 步骤 4.6 优化迭代次数参数
     parser.add_argument(
@@ -4232,4 +4522,5 @@ if __name__ == "__main__":
         reuse_intermediates=args.reuse_intermediates,
         gpt_only=args.gpt_only,
         psd_only=args.psd_only,
+        vectorize_layers=args.vectorize_layers,
     )

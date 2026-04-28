@@ -86,6 +86,7 @@
     const imageModeBtn = $("imageModeBtn");
     const svgModeBtn = $("svgModeBtn");
     const psdModeBtn = $("psdModeBtn");
+    const vectorModeBtn = $("vectorModeBtn");
     const historyList = $("historyList");
     const archiveList = $("archiveList");
     const archiveToggle = $("archiveToggle");
@@ -434,7 +435,7 @@
       if (state.inputMode === "image" || state.inputMode === "text") {
         setInputMode(state.inputMode, false);
       }
-      if (state.outputMode === "psd" || state.outputMode === "svg") {
+      if (["psd", "svg", "vector"].includes(state.outputMode)) {
         setOutputMode(state.outputMode, false);
       }
       if (typeof state.optimizeIterations === "string" && $("optimizeIterations")) {
@@ -520,9 +521,10 @@
     }
 
     function setOutputMode(mode, persist = true) {
-      outputMode = mode === "psd" ? "psd" : "svg";
+      outputMode = ["psd", "vector"].includes(mode) ? mode : "svg";
       svgModeBtn?.classList.toggle("active", outputMode === "svg");
       psdModeBtn?.classList.toggle("active", outputMode === "psd");
+      vectorModeBtn?.classList.toggle("active", outputMode === "vector");
       if (persist) {
         saveInputState();
       }
@@ -569,6 +571,7 @@
     imageModeBtn?.addEventListener("click", () => setInputMode("image"));
     svgModeBtn?.addEventListener("click", () => setOutputMode("svg"));
     psdModeBtn?.addEventListener("click", () => setOutputMode("psd"));
+    vectorModeBtn?.addEventListener("click", () => setOutputMode("vector"));
     archiveToggle?.addEventListener("click", () => {
       showArchive = !showArchive;
       if (archiveList) {
@@ -755,6 +758,7 @@
       const payload = {
         input_mode: inputMode,
         psd_only: outputMode === "psd",
+        vectorize_layers: outputMode === "vector",
         method_text: inputMode === "text" ? methodText : "",
         provider: $("provider").value || null,
         api_key: $("apiKey").value.trim() || null,
@@ -1151,6 +1155,8 @@
       final_psd: { step: 5, label: "分层 PSD 已生成" },
       layers_zip: { step: 5, label: "图层包已生成" },
       optimized_template_svg: { step: 4, label: "优化 SVG 已生成" },
+      vector_layer_svg: { step: 4, label: "矢量图层已生成" },
+      raster_layers_zip: { step: 3, label: "栅格图层包已生成" },
     };
 
     let currentStep = 0;
@@ -1159,8 +1165,8 @@
       1: ["figure"],
       2: ["samed"],
       3: ["icon_nobg", "icon_raw"],
-      4: ["optimized_template_svg", "template_svg"],
-      5: ["final_svg", "final_psd", "optimized_template_svg", "template_svg", "figure"],
+      4: ["vector_layer_svg", "optimized_template_svg", "template_svg"],
+      5: ["final_svg", "final_psd", "vector_layer_svg", "optimized_template_svg", "template_svg", "figure"],
     };
 
     const artifacts = new Set();
@@ -1452,6 +1458,10 @@
         return "分层 PSD";
       case "layers_zip":
         return "图层包";
+      case "raster_layers_zip":
+        return "栅格图层包";
+      case "vector_layer_svg":
+        return "矢量图层";
       case "psd_layer":
         return "PSD 图层";
       case "log":

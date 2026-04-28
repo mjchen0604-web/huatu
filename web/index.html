@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>智能画布</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=zh-20260429-semantic-svg" />
+    <link rel="stylesheet" href="/styles.css?v=zh-20260429-layer-vector" />
   </head>
   <body data-page="input">
     <div class="page">
@@ -28,8 +28,9 @@
             <div class="mode-tabs output-mode-tabs" role="group" aria-label="输出模式">
               <button id="svgModeBtn" class="mode-tab active" type="button">可编辑 SVG</button>
               <button id="psdModeBtn" class="mode-tab" type="button">PSD 分层</button>
+              <button id="vectorModeBtn" class="mode-tab" type="button">PSD→矢量 SVG</button>
             </div>
-            <div class="hint">可编辑 SVG 使用 GPT 语义重构，不走 SAM/Roboflow；PSD 分层只输出 Photoshop 分层 PSD 和图层包。</div>
+            <div class="hint">可编辑 SVG 直接整图重构；PSD 分层只输出 Photoshop 图层；PSD→矢量 SVG 会先分层，再逐层调用 GPT 转成可编辑 SVG。</div>
           </div>
 
           <div id="methodTextGroup">
@@ -261,6 +262,6 @@
       </main>
     </div>
 
-    <script src="/app.js?v=zh-20260429-semantic-svg"></script>
+    <script src="/app.js?v=zh-20260429-layer-vector"></script>
   </body>
 </html>
